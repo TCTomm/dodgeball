@@ -44,15 +44,15 @@ const C = {
   SLING_MAX_PX:  90,    // pull distance for maximum speed
   SPD_MIN:      340,
   SPD_MAX:      900,
-  WINDUP_MS:   2100,    // AI wind-up before throw
-  AI_SPREAD:   0.24,    // radians of random spread on AI throw
-  AI_BASE_SPD: 540,
-  AI_SPD_VAR:  120,
+  WINDUP_MS:   1650,    // AI wind-up before throw
+  AI_SPREAD:   0.13,    // radians of random spread on AI throw (tighter aim)
+  AI_BASE_SPD: 600,
+  AI_SPD_VAR:  100,
   AI_MOVE_PX:  135,     // px/s AI wander speed
   AI_FAST_MUL:  2.2,    // speed multiplier when winding up
   RESULT_MS:    950,
   FLASH_MS:     380,
-  DODGE_REACT:  300,    // ms before AI reacts to incoming ball
+  DODGE_REACT:  160,    // ms before AI reacts to incoming ball (faster)
 };
 
 // ── Player ────────────────────────────────────────────────────────────────────
@@ -155,7 +155,7 @@ function goto(phase) {
     game.ball = null;
     sl.on = false;
     mv.on = false;
-    game.aiPlayers.forEach(p => { p.winding = false; });
+    game.aiPlayers.forEach(p => { p.winding = false; p.mt = 0; });
   }
 
   if (phase === 'AI_WINDUP') {
@@ -246,16 +246,16 @@ function aiReactToBall(ball) {
     const futY = ball.y + ball.vy * t;
     const miss = Math.hypot(futX - p.x, futY - p.y);
 
-    if (miss < PR * 3.5) {
+    if (miss < PR * 2.2) {
       // Dodge perpendicular to ball direction
       const spd  = Math.sqrt(spd2);
       const perpX = -ball.vy / spd;
       const perpY =  ball.vx / spd;
       const dir   = (p.y < crtY + crtH * 0.5) ? 1 : -1;
-      p.tx = p.x + perpX * dir * PR * 3.8;
-      p.ty = p.y + perpY * dir * PR * 3.8;
+      p.tx = p.x + perpX * dir * PR * 3.2;
+      p.ty = p.y + perpY * dir * PR * 3.2;
       p.clampTarget();
-      p.mt = 750; // hold the dodge for a bit
+      p.mt = 650;
     }
   });
 }
@@ -294,6 +294,7 @@ function aiThrow() {
 
   game.ball = new Ball(th.x, th.y, Math.cos(angle) * spd, Math.sin(angle) * spd, 'red');
   th.winding = false;
+  th.mt = 0;   // resume normal roaming immediately
   game.phase = 'BALL_FLYING_A';
 }
 
@@ -320,7 +321,7 @@ function updateBall(dt) {
   const targets = b.from === 'blue' ? game.aiPlayers : game.players;
   for (const p of targets) {
     if (!p.alive) continue;
-    if (Math.hypot(b.x - p.x, b.y - p.y) < (BR + p.r) * 1.2) {
+    if (Math.hypot(b.x - p.x, b.y - p.y) < (BR + p.r) * 0.82) {
       onHit(p); return;
     }
   }

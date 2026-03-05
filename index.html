@@ -40,19 +40,19 @@ function resize() {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const C = {
-  SLING_MIN_PX:  18,    // min pull distance to register a throw
-  SLING_MAX_PX:  90,    // pull distance for maximum speed
+  SLING_MIN_PX:  18,
+  SLING_MAX_PX:  90,
   SPD_MIN:      340,
   SPD_MAX:      900,
-  WINDUP_MS:   1650,    // AI wind-up before throw
-  AI_SPREAD:   0.13,    // radians of random spread on AI throw (tighter aim)
+  WINDUP_MS:   1650,
+  AI_SPREAD:   0.13,
   AI_BASE_SPD: 600,
   AI_SPD_VAR:  100,
-  AI_MOVE_PX:  135,     // px/s AI wander speed
-  AI_FAST_MUL:  2.2,    // speed multiplier when winding up
+  AI_MOVE_PX:  135,
+  AI_FAST_MUL:  2.2,
   RESULT_MS:    950,
   FLASH_MS:     380,
-  DODGE_REACT:  160,    // ms before AI reacts to incoming ball (faster)
+  DODGE_REACT:  160,
 };
 
 // ── Player ────────────────────────────────────────────────────────────────────
@@ -63,10 +63,9 @@ class Player {
     this.idx  = idx;
     this.alive = true;
     this.flash = 0;
-    // AI roam state
-    this.tx = x; this.ty = y;   // current move target
-    this.mt = 0;                 // move timer (ms until new target)
-    this.winding = false;        // is this AI player winding up a throw?
+    this.tx = x; this.ty = y;
+    this.mt = 0;
+    this.winding = false;
   }
 
   get r() { return PR; }
@@ -96,7 +95,7 @@ class Ball {
   constructor(x, y, vx, vy, from) {
     this.x = x; this.y = y;
     this.vx = vx; this.vy = vy;
-    this.from = from;   // 'blue' | 'red'
+    this.from = from;
     this.trail = [];
     this.age = 0;
   }
@@ -105,6 +104,7 @@ class Ball {
 // ── Game State ────────────────────────────────────────────────────────────────
 const game = {
   phase:       'MENU',
+  mode:        'cpu',   // 'cpu' | 'human'
   players:     [],
   aiPlayers:   [],
   ball:        null,
@@ -116,17 +116,35 @@ const game = {
   windupTimer: 0,
   aiThrower:   null,
   aiTarget:    null,
-  lastThrower: null,   // 'player' | 'ai' — who threw last
+  lastThrower: null,
 };
 
-// ── Slingshot drag state ──────────────────────────────────────────────────────
-const sl = { on: false, player: null, ox: 0, oy: 0, dx: 0, dy: 0 };
+// ── Multi-touch state ─────────────────────────────────────────────────────────
+// Each entry: { kind: 'p1sling'|'p2sling'|'p1drag'|'p2drag',
+//               player, ox?, oy?, dx?, dy?, offX?, offY? }
+const tMap = new Map();
 
-// ── Move drag state (defend phase) ───────────────────────────────────────────
-const mv = { on: false, player: null, offX: 0, offY: 0 };
+function getP1Sling() {
+  for (const e of tMap.values()) if (e.kind === 'p1sling') return e;
+  return null;
+}
+function getP2Sling() {
+  for (const e of tMap.values()) if (e.kind === 'p2sling') return e;
+  return null;
+}
+
+// ── Menu button rects ─────────────────────────────────────────────────────────
+const cpuBtn  = { x: 0, y: 0, w: 0, h: 0 };
+const pvpBtn  = { x: 0, y: 0, w: 0, h: 0 };
+const playBtn = { x: 0, y: 0, w: 0, h: 0 };
+
+function inBtn(x, y, btn) {
+  return x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h;
+}
 
 // ── Init / State Transitions ──────────────────────────────────────────────────
-function initGame() {
+function initGame(mode) {
+  game.mode = mode;
   const yFracs = [0.20, 0.50, 0.80];
   const bx = crtX + crtW * 0.13;
   const rx = crtX + crtW * 0.87;
@@ -143,31 +161,29 @@ function initGame() {
   game.resultTimer = 0;
   game.winSide     = null;
   game.lastThrower = null;
-  sl.on = false;
-  mv.on = false;
   goto('PLAYER_ATTACK');
 }
 
 function goto(phase) {
   game.phase = phase;
+  tMap.clear();
 
   if (phase === 'PLAYER_ATTACK') {
     game.ball = null;
-    sl.on = false;
-    mv.on = false;
     game.aiPlayers.forEach(p => { p.winding = false; p.mt = 0; });
+  }
+
+  if (phase === 'P2_ATTACK') {
+    game.ball = null;
   }
 
   if (phase === 'AI_WINDUP') {
     game.ball = null;
-    sl.on = false;
-    mv.on = false;
     const alive   = game.aiPlayers.filter(p => p.alive);
     const targets = game.players.filter(p => p.alive);
     game.aiThrower = alive[Math.floor(Math.random() * alive.length)];
     game.aiTarget  = targets[Math.floor(Math.random() * targets.length)];
     game.windupTimer = C.WINDUP_MS;
-    // Thrower charges toward center
     game.aiThrower.winding = true;
     game.aiThrower.tx = midX - PR * 3.5;
     game.aiThrower.ty = game.aiTarget.y;
@@ -177,8 +193,6 @@ function goto(phase) {
 
   if (phase === 'GAME_OVER') {
     game.ball = null;
-    sl.on = false;
-    mv.on = false;
   }
 }
 
@@ -187,7 +201,6 @@ function updateAI(dt) {
   game.aiPlayers.forEach(p => {
     if (!p.alive) return;
 
-    // Move toward current target
     const dx = p.tx - p.x, dy = p.ty - p.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist > 1.5) {
@@ -198,19 +211,16 @@ function updateAI(dt) {
       p.clamp();
     }
 
-    // Tick move timer and pick new wander target
     if (!p.winding) {
       p.mt -= dt;
       if (p.mt <= 0) pickAIWanderTarget(p);
     }
 
-    // Thrower tracks the target's y during wind-up
     if (p.winding && game.aiTarget && game.aiTarget.alive) {
       p.ty = game.aiTarget.y;
     }
   });
 
-  // React to a ball flying toward the AI side
   if (game.phase === 'BALL_FLYING_P' && game.ball) {
     aiReactToBall(game.ball);
   }
@@ -218,36 +228,31 @@ function updateAI(dt) {
 
 function pickAIWanderTarget(p) {
   const z = p.zone();
-  // During player attack, AI spreads a bit wider; otherwise normal roam
   p.tx = z.x0 + Math.random() * (z.x1 - z.x0);
   p.ty = z.y0 + Math.random() * (z.y1 - z.y0);
   p.clampTarget();
   p.mt = 600 + Math.random() * 1000;
 }
 
-// Trajectory-prediction dodge for AI
 function aiReactToBall(ball) {
   const spd2 = ball.vx * ball.vx + ball.vy * ball.vy;
   if (spd2 < 1) return;
 
   game.aiPlayers.forEach(p => {
-    if (!p.alive || p.mt > 400) return; // already committed to a move
+    if (!p.alive || p.mt > 400) return;
 
-    // Vector from ball to player
     const bpx = p.x - ball.x, bpy = p.y - ball.y;
     const dot = ball.vx * bpx + ball.vy * bpy;
-    if (dot <= 0) return; // ball heading away
+    if (dot <= 0) return;
 
-    // Time to closest approach
     const t = dot / spd2;
-    if (t > 1.4) return; // too far in future
+    if (t > 1.4) return;
 
     const futX = ball.x + ball.vx * t;
     const futY = ball.y + ball.vy * t;
     const miss = Math.hypot(futX - p.x, futY - p.y);
 
     if (miss < PR * 2.2) {
-      // Dodge perpendicular to ball direction
       const spd  = Math.sqrt(spd2);
       const perpX = -ball.vy / spd;
       const perpY =  ball.vx / spd;
@@ -261,27 +266,42 @@ function aiReactToBall(ball) {
 }
 
 // ── Throws ────────────────────────────────────────────────────────────────────
-function playerThrow() {
-  const p = sl.player;
-  if (!p || !p.alive) { sl.on = false; return; }
+function playerThrow(entry) {
+  const p = entry.player;
+  if (!p || !p.alive) return;
 
-  const dist = Math.sqrt(sl.dx * sl.dx + sl.dy * sl.dy);
-  if (dist < C.SLING_MIN_PX) { sl.on = false; return; }
+  const dist = Math.hypot(entry.dx, entry.dy);
+  if (dist < C.SLING_MIN_PX) return;
 
-  // Throw direction is OPPOSITE of pull
-  const ndx = -sl.dx / dist, ndy = -sl.dy / dist;
+  const ndx = -entry.dx / dist, ndy = -entry.dy / dist;
   const t   = Math.min(1, dist / C.SLING_MAX_PX);
   const spd = C.SPD_MIN + t * (C.SPD_MAX - C.SPD_MIN);
 
   game.ball = new Ball(p.x, p.y, ndx * spd, ndy * spd, 'blue');
-  sl.on = false;
   game.phase       = 'BALL_FLYING_P';
-  game.lastThrower = 'player';
+  game.lastThrower = 'p1';
 
-  // Delayed AI reaction (gives player a fair reaction window too)
-  setTimeout(() => {
-    if (game.ball && game.ball.from === 'blue') aiReactToBall(game.ball);
-  }, C.DODGE_REACT);
+  if (game.mode === 'cpu') {
+    setTimeout(() => {
+      if (game.ball && game.ball.from === 'blue') aiReactToBall(game.ball);
+    }, C.DODGE_REACT);
+  }
+}
+
+function p2Throw(entry) {
+  const p = entry.player;
+  if (!p || !p.alive) return;
+
+  const dist = Math.hypot(entry.dx, entry.dy);
+  if (dist < C.SLING_MIN_PX) return;
+
+  const ndx = -entry.dx / dist, ndy = -entry.dy / dist;
+  const t   = Math.min(1, dist / C.SLING_MAX_PX);
+  const spd = C.SPD_MIN + t * (C.SPD_MAX - C.SPD_MIN);
+
+  game.ball = new Ball(p.x, p.y, ndx * spd, ndy * spd, 'red');
+  game.phase       = 'BALL_FLYING_2';
+  game.lastThrower = 'p2';
 }
 
 function aiThrow() {
@@ -294,7 +314,7 @@ function aiThrow() {
 
   game.ball = new Ball(th.x, th.y, Math.cos(angle) * spd, Math.sin(angle) * spd, 'red');
   th.winding = false;
-  th.mt = 0;   // resume normal roaming immediately
+  th.mt = 0;
   game.phase = 'BALL_FLYING_A';
 }
 
@@ -310,14 +330,12 @@ function updateBall(dt) {
   b.x += b.vx * dt / 1000;
   b.y += b.vy * dt / 1000;
 
-  // Out of bounds → miss
   const mg = BR + 8;
   if (b.x < crtX - mg || b.x > crtX + crtW + mg ||
       b.y < crtY - mg || b.y > crtY + crtH + mg) {
     onMiss(); return;
   }
 
-  // Hit detection
   const targets = b.from === 'blue' ? game.aiPlayers : game.players;
   for (const p of targets) {
     if (!p.alive) continue;
@@ -353,27 +371,27 @@ function checkWin() {
   const pa = game.players.filter(p => p.alive).length;
   if (ra === 0) { game.winSide = 'blue'; goto('GAME_OVER'); return; }
   if (pa === 0) { game.winSide = 'red';  goto('GAME_OVER'); return; }
-  // Alternate: player just threw → AI's turn; AI just threw → player's turn
-  if (game.lastThrower === 'player') goto('AI_WINDUP');
-  else goto('PLAYER_ATTACK');
+
+  if (game.mode === 'human') {
+    if (game.lastThrower === 'p1') goto('P2_ATTACK');
+    else goto('PLAYER_ATTACK');
+  } else {
+    if (game.lastThrower === 'p1') goto('AI_WINDUP');
+    else goto('PLAYER_ATTACK');
+  }
 }
 
 // ── Update Loop ───────────────────────────────────────────────────────────────
 let lastTs = 0;
 
 function update(dt) {
-  // Flash decay
   game.players.concat(game.aiPlayers).forEach(p => { if (p.flash > 0) p.flash -= dt; });
-
-  // Effects
   game.effects = game.effects.filter(e => { e.age += dt; return e.age < e.dur; });
 
-  // Result display pause
   if (game.resultTimer > 0) {
     game.resultTimer -= dt;
     if (game.resultTimer <= 0) checkWin();
-    // AI still wanders during result pause for visual life
-    if (game.phase !== 'MENU' && game.phase !== 'GAME_OVER') updateAI(dt);
+    if (game.mode === 'cpu' && game.phase !== 'MENU' && game.phase !== 'GAME_OVER') updateAI(dt);
     return;
   }
 
@@ -381,105 +399,143 @@ function update(dt) {
   if (ph === 'MENU' || ph === 'GAME_OVER') return;
 
   updateBall(dt);
-  updateAI(dt);
 
-  if (ph === 'AI_WINDUP') {
-    game.windupTimer -= dt;
-    if (game.windupTimer <= 0) aiThrow();
+  if (game.mode === 'cpu') {
+    updateAI(dt);
+    if (ph === 'AI_WINDUP') {
+      game.windupTimer -= dt;
+      if (game.windupTimer <= 0) aiThrow();
+    }
   }
 }
 
 // ── Input ─────────────────────────────────────────────────────────────────────
-const ptr = { dn: false };
-
-function coords(e) {
-  const r = canvas.getBoundingClientRect();
-  const s = e.touches ? e.touches[0] : (e.changedTouches ? e.changedTouches[0] : e);
-  return { x: s.clientX - r.left, y: s.clientY - r.top };
-}
-
 function nearPlayer(x, y, p) {
   return p.alive && Math.hypot(x - p.x, y - p.y) < p.r * 1.9;
 }
 
-function onDown(e) {
-  e.preventDefault();
-  const { x, y } = coords(e);
-  ptr.dn = true;
-
+function startTouch(id, x, y) {
   const ph = game.phase;
 
-  if (ph === 'MENU' || ph === 'GAME_OVER') {
-    if (inBtn(x, y)) initGame();
-    return;
-  }
-
-  // Attack turn: start slingshot on any player touch
-  if (ph === 'PLAYER_ATTACK') {
+  // P1 slingshot: attack turn, touch a blue player
+  if (ph === 'PLAYER_ATTACK' && !getP1Sling()) {
     for (const p of game.players) {
       if (nearPlayer(x, y, p)) {
-        sl.on     = true;
-        sl.player = p;
-        sl.ox     = p.x;
-        sl.oy     = p.y;
-        sl.dx     = 0;
-        sl.dy     = 0;
-        break;
-      }
-    }
-    return;
-  }
-
-  // Defense turns: drag player to reposition
-  if (ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A') {
-    for (const p of game.players) {
-      if (nearPlayer(x, y, p)) {
-        mv.on     = true;
-        mv.player = p;
-        mv.offX   = p.x - x;
-        mv.offY   = p.y - y;
-        break;
+        tMap.set(id, { kind: 'p1sling', player: p, ox: p.x, oy: p.y, dx: 0, dy: 0 });
+        return;
       }
     }
   }
-}
 
-function onMove(e) {
-  e.preventDefault();
-  const { x, y } = coords(e);
-
-  if (sl.on) {
-    sl.dx = x - sl.ox;
-    sl.dy = y - sl.oy;
+  // P2 slingshot (human mode): P2 attack turn, touch a red player
+  if (ph === 'P2_ATTACK' && !getP2Sling()) {
+    for (const p of game.aiPlayers) {
+      if (nearPlayer(x, y, p)) {
+        tMap.set(id, { kind: 'p2sling', player: p, ox: p.x, oy: p.y, dx: 0, dy: 0 });
+        return;
+      }
+    }
   }
 
-  if (mv.on && mv.player) {
-    mv.player.x = x + mv.offX;
-    mv.player.y = y + mv.offY;
-    mv.player.clamp();
+  // P1 dodge: drag blue players during P2's attack/flight
+  if (ph === 'P2_ATTACK' || ph === 'BALL_FLYING_2') {
+    for (const p of game.players) {
+      if (nearPlayer(x, y, p)) {
+        tMap.set(id, { kind: 'p1drag', player: p, offX: p.x - x, offY: p.y - y });
+        return;
+      }
+    }
+  }
+
+  // P2 dodge (human mode): drag red players during P1's attack/flight
+  if (game.mode === 'human' && (ph === 'PLAYER_ATTACK' || ph === 'BALL_FLYING_P')) {
+    for (const p of game.aiPlayers) {
+      if (nearPlayer(x, y, p)) {
+        tMap.set(id, { kind: 'p2drag', player: p, offX: p.x - x, offY: p.y - y });
+        return;
+      }
+    }
+  }
+
+  // P1 dodge (cpu mode): drag blue players while AI is attacking
+  if (game.mode === 'cpu' && (ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A')) {
+    for (const p of game.players) {
+      if (nearPlayer(x, y, p)) {
+        tMap.set(id, { kind: 'p1drag', player: p, offX: p.x - x, offY: p.y - y });
+        return;
+      }
+    }
   }
 }
 
-function onUp(e) {
-  e.preventDefault();
-  if (!ptr.dn) return;
-  ptr.dn = false;
-
-  if (sl.on) playerThrow();
-
-  mv.on     = false;
-  mv.player = null;
+function moveTouch(id, x, y) {
+  const e = tMap.get(id);
+  if (!e) return;
+  if (e.kind === 'p1sling' || e.kind === 'p2sling') {
+    e.dx = x - e.ox;
+    e.dy = y - e.oy;
+  } else {
+    e.player.x = x + e.offX;
+    e.player.y = y + e.offY;
+    e.player.clamp();
+  }
 }
 
-let btnX = 0, btnY = 0, btnW = 220, btnH = 55;
-function inBtn(x, y) { return x >= btnX && x <= btnX + btnW && y >= btnY && y <= btnY + btnH; }
+function endTouch(id) {
+  const e = tMap.get(id);
+  if (e) {
+    if (e.kind === 'p1sling') playerThrow(e);
+    if (e.kind === 'p2sling') p2Throw(e);
+  }
+  tMap.delete(id);
+}
 
-canvas.addEventListener('touchstart', onDown, { passive: false });
-canvas.addEventListener('touchmove',  onMove, { passive: false });
-canvas.addEventListener('touchend',   onUp,   { passive: false });
-canvas.addEventListener('mousedown',  onDown);
-canvas.addEventListener('mousemove',  onMove);
-canvas.addEventListener('mouseup',    onUp);
+function handleOverlayTouch(x, y) {
+  if (game.phase === 'MENU') {
+    if (inBtn(x, y, cpuBtn))  initGame('cpu');
+    else if (inBtn(x, y, pvpBtn)) initGame('human');
+  } else if (game.phase === 'GAME_OVER') {
+    if (inBtn(x, y, playBtn)) initGame(game.mode);
+  }
+}
+
+const MOUSE_ID = -1;
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  for (const t of e.changedTouches) {
+    const x = t.clientX - r.left, y = t.clientY - r.top;
+    if (game.phase === 'MENU' || game.phase === 'GAME_OVER') handleOverlayTouch(x, y);
+    else startTouch(t.identifier, x, y);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  for (const t of e.changedTouches) {
+    moveTouch(t.identifier, t.clientX - r.left, t.clientY - r.top);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) endTouch(t.identifier);
+}, { passive: false });
+
+canvas.addEventListener('mousedown', e => {
+  const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  if (game.phase === 'MENU' || game.phase === 'GAME_OVER') handleOverlayTouch(x, y);
+  else startTouch(MOUSE_ID, x, y);
+});
+canvas.addEventListener('mousemove', e => {
+  if (!tMap.has(MOUSE_ID)) return;
+  const r = canvas.getBoundingClientRect();
+  moveTouch(MOUSE_ID, e.clientX - r.left, e.clientY - r.top);
+});
+canvas.addEventListener('mouseup', () => endTouch(MOUSE_ID));
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
 function render() {
@@ -494,15 +550,22 @@ function render() {
 
   game.aiPlayers.concat(game.players).forEach(drawPlayer);
 
-  // Slingshot overlay (on top of players)
-  if (sl.on && sl.player) drawSlingshot();
+  // Slingshot overlays
+  const p1sl = getP1Sling();
+  const p2sl = getP2Sling();
+  if (p1sl) drawSlingshot(p1sl, '#3a86ff');
+  if (p2sl) drawSlingshot(p2sl, '#ff4444');
 
   const ph = game.phase;
-  if ((ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A') && game.aiTarget && game.aiTarget.alive) {
-    drawWarnRing(game.aiTarget);
-  }
-  if (ph === 'AI_WINDUP' && game.aiThrower && game.aiThrower.alive) {
-    drawWindupRing();
+
+  // CPU mode warning / windup rings
+  if (game.mode === 'cpu') {
+    if ((ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A') && game.aiTarget && game.aiTarget.alive) {
+      drawWarnRing(game.aiTarget);
+    }
+    if (ph === 'AI_WINDUP' && game.aiThrower && game.aiThrower.alive) {
+      drawWindupRing();
+    }
   }
 
   drawHUD();
@@ -517,7 +580,6 @@ function drawCourt() {
   rr(crtX, crtY, crtW, crtH, 12);
   ctx.fill();
 
-  // Subtle horizontal texture lines
   ctx.strokeStyle = 'rgba(255,255,255,0.045)';
   ctx.lineWidth = 1;
   for (let i = 1; i < 6; i++) {
@@ -528,7 +590,6 @@ function drawCourt() {
     ctx.stroke();
   }
 
-  // Center dashed line
   ctx.save();
   ctx.setLineDash([10, 8]);
   ctx.strokeStyle = 'rgba(255,255,255,0.28)';
@@ -539,19 +600,22 @@ function drawCourt() {
   ctx.stroke();
   ctx.restore();
 
-  // Border
   ctx.strokeStyle = 'rgba(255,255,255,0.55)';
   ctx.lineWidth = 3;
   rr(crtX, crtY, crtW, crtH, 12);
   ctx.stroke();
 
-  // Zone labels
   ctx.fillStyle = 'rgba(255,255,255,0.09)';
   ctx.font      = `bold ${Math.max(11, PR * 0.68)}px Arial`;
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('YOUR SIDE',  crtX + crtW * 0.25, crtY + crtH * 0.5);
-  ctx.fillText('THEIR SIDE', crtX + crtW * 0.75, crtY + crtH * 0.5);
+  if (game.mode === 'human') {
+    ctx.fillText('P1 SIDE', crtX + crtW * 0.25, crtY + crtH * 0.5);
+    ctx.fillText('P2 SIDE', crtX + crtW * 0.75, crtY + crtH * 0.5);
+  } else {
+    ctx.fillText('YOUR SIDE',  crtX + crtW * 0.25, crtY + crtH * 0.5);
+    ctx.fillText('THEIR SIDE', crtX + crtW * 0.75, crtY + crtH * 0.5);
+  }
 }
 
 function rr(x, y, w, h, r) {
@@ -581,7 +645,6 @@ function drawPlayer(p) {
   ctx.fill();
   ctx.shadowBlur = 0;
 
-  // Shine
   const g = ctx.createRadialGradient(
     p.x - p.r * 0.3, p.y - p.r * 0.35, p.r * 0.1,
     p.x, p.y, p.r
@@ -593,7 +656,6 @@ function drawPlayer(p) {
   ctx.fillStyle = g;
   ctx.fill();
 
-  // Number
   ctx.fillStyle    = '#ffffff';
   ctx.font         = `bold ${Math.round(p.r * 0.78)}px Arial`;
   ctx.textAlign    = 'center';
@@ -604,17 +666,16 @@ function drawPlayer(p) {
 }
 
 // ── Slingshot ─────────────────────────────────────────────────────────────────
-function drawSlingshot() {
-  const p    = sl.player;
-  const dist = Math.sqrt(sl.dx * sl.dx + sl.dy * sl.dy);
+function drawSlingshot(entry, ghostColor) {
+  const p    = entry.player;
+  const dist = Math.hypot(entry.dx, entry.dy);
   const t    = Math.min(1, dist / C.SLING_MAX_PX);
-  const cx   = sl.ox + sl.dx;
-  const cy   = sl.oy + sl.dy;
+  const cx   = entry.ox + entry.dx;
+  const cy   = entry.oy + entry.dy;
 
-  // Trajectory preview line
   if (dist >= C.SLING_MIN_PX) {
-    const ndx = -sl.dx / dist;
-    const ndy = -sl.dy / dist;
+    const ndx = -entry.dx / dist;
+    const ndy = -entry.dy / dist;
     ctx.save();
     ctx.setLineDash([6, 9]);
     ctx.strokeStyle = `rgba(255,255,80,${0.3 + t * 0.5})`;
@@ -626,7 +687,6 @@ function drawSlingshot() {
     ctx.restore();
   }
 
-  // Rubber band lines from player edges to finger
   ctx.strokeStyle = `rgba(255,210,0,0.75)`;
   ctx.lineWidth   = 3;
   ctx.beginPath();
@@ -636,16 +696,14 @@ function drawSlingshot() {
   ctx.lineTo(cx, cy);
   ctx.stroke();
 
-  // Ghost player at pull position
   ctx.save();
   ctx.globalAlpha = 0.38;
   ctx.beginPath();
   ctx.arc(cx, cy, p.r, 0, Math.PI * 2);
-  ctx.fillStyle = '#3a86ff';
+  ctx.fillStyle = ghostColor;
   ctx.fill();
   ctx.restore();
 
-  // Power bar above player
   if (dist >= C.SLING_MIN_PX) {
     const bw = 58, bh = 8;
     const bx = p.x - bw / 2;
@@ -679,7 +737,6 @@ function drawWindupRing() {
   const p    = game.aiThrower;
   const frac = 1 - game.windupTimer / C.WINDUP_MS;
 
-  // Charging arc around thrower
   ctx.beginPath();
   ctx.arc(p.x, p.y, p.r + 13, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
   ctx.strokeStyle = '#ffcc00';
@@ -687,7 +744,6 @@ function drawWindupRing() {
   ctx.lineCap     = 'round';
   ctx.stroke();
 
-  // Dashed aim line to target
   if (game.aiTarget && game.aiTarget.alive) {
     ctx.save();
     ctx.setLineDash([5, 6]);
@@ -748,7 +804,6 @@ function drawEffects() {
 function drawHUD() {
   const fsz = Math.max(14, Math.round(CH * 0.026));
 
-  // Top score bar
   ctx.fillStyle = 'rgba(0,0,0,0.42)';
   ctx.fillRect(0, 0, CW, crtY - 2);
 
@@ -758,42 +813,58 @@ function drawHUD() {
   ctx.font         = `bold ${fsz}px Arial`;
   ctx.textBaseline = 'middle';
 
-  ctx.fillStyle = '#3a86ff';
-  ctx.textAlign = 'left';
-  ctx.fillText(`YOU: ${ab}/3`, 14, crtY / 2);
-
-  ctx.fillStyle = '#ff4444';
-  ctx.textAlign = 'right';
-  ctx.fillText(`THEM: ${ar}/3`, CW - 14, crtY / 2);
+  if (game.mode === 'human') {
+    ctx.fillStyle = '#3a86ff';
+    ctx.textAlign = 'left';
+    ctx.fillText(`P1: ${ab}/3`, 14, crtY / 2);
+    ctx.fillStyle = '#ff4444';
+    ctx.textAlign = 'right';
+    ctx.fillText(`P2: ${ar}/3`, CW - 14, crtY / 2);
+  } else {
+    ctx.fillStyle = '#3a86ff';
+    ctx.textAlign = 'left';
+    ctx.fillText(`YOU: ${ab}/3`, 14, crtY / 2);
+    ctx.fillStyle = '#ff4444';
+    ctx.textAlign = 'right';
+    ctx.fillText(`THEM: ${ar}/3`, CW - 14, crtY / 2);
+  }
 
   const ph = game.phase;
-  const phLabel = {
-    PLAYER_ATTACK: 'YOUR TURN',
-    BALL_FLYING_P: 'IN FLIGHT',
-    AI_WINDUP:     '⚠ INCOMING!',
-    BALL_FLYING_A: 'DODGE!',
-  }[ph];
+  const phLabel = game.mode === 'human'
+    ? { PLAYER_ATTACK: 'P1 ATTACK', BALL_FLYING_P: 'IN FLIGHT',
+        P2_ATTACK: 'P2 ATTACK',     BALL_FLYING_2: 'IN FLIGHT' }[ph]
+    : { PLAYER_ATTACK: 'YOUR TURN', BALL_FLYING_P: 'IN FLIGHT',
+        AI_WINDUP: '⚠ INCOMING!',   BALL_FLYING_A: 'DODGE!' }[ph];
 
   if (phLabel) {
-    ctx.fillStyle = (ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A') ? '#ff8080' : '#ffffff';
+    let color = '#ffffff';
+    if (game.mode === 'human') {
+      if (ph === 'PLAYER_ATTACK') color = '#5599ff';
+      else if (ph === 'P2_ATTACK') color = '#ff7070';
+    } else {
+      if (ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A') color = '#ff8080';
+    }
+    ctx.fillStyle = color;
     ctx.font      = `bold ${fsz}px Arial`;
     ctx.textAlign = 'center';
     ctx.fillText(phLabel, CW / 2, crtY / 2);
   }
 
-  // Bottom hint bar
   const barY = crtY + crtH + 4;
   const barH = CH - barY;
   if (barH > 4) {
     ctx.fillStyle = 'rgba(0,0,0,0.32)';
     ctx.fillRect(0, barY, CW, barH);
 
-    const hint = {
-      PLAYER_ATTACK: 'Pull back a player to aim & throw',
-      BALL_FLYING_P: '',
-      AI_WINDUP:     'Drag your players to dodge!',
-      BALL_FLYING_A: 'Drag to dodge!',
-    }[ph];
+    const hint = game.mode === 'human'
+      ? { PLAYER_ATTACK: 'P1: pull back to throw  •  P2: drag to dodge',
+          BALL_FLYING_P: 'P2: drag your players to dodge!',
+          P2_ATTACK:     'P2: pull back to throw  •  P1: drag to dodge',
+          BALL_FLYING_2: 'P1: drag your players to dodge!' }[ph]
+      : { PLAYER_ATTACK: 'Pull back a player to aim & throw',
+          BALL_FLYING_P: '',
+          AI_WINDUP:     'Drag your players to dodge!',
+          BALL_FLYING_A: 'Drag to dodge!' }[ph];
 
     if (hint) {
       ctx.fillStyle    = 'rgba(255,255,255,0.65)';
@@ -803,8 +874,7 @@ function drawHUD() {
       ctx.fillText(hint, CW / 2, barY + barH / 2);
     }
 
-    // Windup countdown bar
-    if (ph === 'AI_WINDUP') {
+    if (game.mode === 'cpu' && ph === 'AI_WINDUP') {
       const frac = game.windupTimer / C.WINDUP_MS;
       const bw2  = Math.min(CW * 0.32, 170);
       const bh2  = Math.min(barH * 0.32, 9);
@@ -834,7 +904,7 @@ function drawResult() {
 }
 
 // ── Overlays ──────────────────────────────────────────────────────────────────
-function drawOverlay(title, titleColor, sub, btnLabel) {
+function drawOverlay(title, titleColor, sub) {
   ctx.fillStyle = 'rgba(10,10,30,0.86)';
   ctx.fillRect(0, 0, CW, CH);
 
@@ -846,54 +916,89 @@ function drawOverlay(title, titleColor, sub, btnLabel) {
   ctx.textBaseline = 'middle';
   ctx.shadowColor  = 'rgba(0,0,0,0.8)';
   ctx.shadowBlur   = 12;
-  ctx.fillText(title, cx, cy - CH * 0.15);
+  ctx.fillText(title, cx, cy - CH * 0.18);
   ctx.shadowBlur   = 0;
 
   ctx.fillStyle = 'rgba(255,255,255,0.72)';
   ctx.font      = `${Math.max(13, Math.round(CH * 0.026))}px Arial`;
-  ctx.fillText(sub, cx, cy - CH * 0.06);
+  ctx.fillText(sub, cx, cy - CH * 0.08);
+}
 
-  btnW = Math.min(220, CW * 0.5);
-  btnH = Math.max(46, CH * 0.07);
-  btnX = cx - btnW / 2;
-  btnY = cy + CH * 0.02;
-
-  ctx.fillStyle = '#3a86ff';
-  rr(btnX, btnY, btnW, btnH, 10);
+function drawMenuBtn(btn, color, label, sublabel) {
+  ctx.fillStyle = color;
+  rr(btn.x, btn.y, btn.w, btn.h, 10);
   ctx.fill();
   ctx.fillStyle    = '#ffffff';
-  ctx.font         = `bold ${Math.max(16, Math.round(CH * 0.032))}px Arial`;
+  ctx.font         = `bold ${Math.max(14, Math.round(CH * 0.030))}px Arial`;
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(btnLabel, cx, btnY + btnH / 2);
+  ctx.fillText(label, btn.x + btn.w / 2, btn.y + btn.h * 0.38);
+  if (sublabel) {
+    ctx.font      = `${Math.max(11, Math.round(CH * 0.019))}px Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.72)';
+    ctx.fillText(sublabel, btn.x + btn.w / 2, btn.y + btn.h * 0.72);
+  }
 }
 
 function drawMenu() {
-  drawOverlay(
-    'DODGEBALL', '#ffffff',
-    'Pull back to throw  •  Drag to dodge',
-    'START GAME'
-  );
-  ctx.fillStyle    = 'rgba(255,255,255,0.4)';
+  drawOverlay('DODGEBALL', '#ffffff', 'Pull back to throw  •  Drag to dodge');
+
+  const cx = CW / 2, cy = CH / 2;
+  const bw = Math.min(200, CW * 0.40);
+  const bh = Math.max(52, CH * 0.08);
+  const gap = Math.min(18, CW * 0.04);
+  const totalW = bw * 2 + gap;
+
+  cpuBtn.w = bw; cpuBtn.h = bh;
+  pvpBtn.w = bw; pvpBtn.h = bh;
+  cpuBtn.x = cx - totalW / 2;
+  pvpBtn.x = cpuBtn.x + bw + gap;
+  cpuBtn.y = pvpBtn.y = cy - CH * 0.01;
+
+  drawMenuBtn(cpuBtn, '#2255cc', 'VS COMPUTER', '1 player');
+  drawMenuBtn(pvpBtn, '#bb2200', 'VS PLAYER',   '2 players · same device');
+
+  ctx.fillStyle    = 'rgba(255,255,255,0.35)';
   ctx.font         = `${Math.max(11, Math.round(CH * 0.019))}px Arial`;
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(
     'Opponents move dynamically — aim carefully!',
-    CW / 2, btnY + btnH + Math.max(20, CH * 0.042)
+    cx, cpuBtn.y + bh + Math.max(20, CH * 0.042)
   );
 }
 
 function drawGameOver() {
-  const won = game.winSide === 'blue';
+  const blueWon = game.winSide === 'blue';
   const ab  = game.players.filter(p => p.alive).length;
   const ar  = game.aiPlayers.filter(p => p.alive).length;
-  drawOverlay(
-    won ? 'YOU WIN!' : 'YOU LOSE!',
-    won ? '#00ff88' : '#ff4444',
-    `Blue: ${ab} alive  •  Red: ${ar} alive`,
-    'PLAY AGAIN'
-  );
+
+  let title, titleColor, sub;
+  if (game.mode === 'human') {
+    title      = blueWon ? 'P1 WINS!' : 'P2 WINS!';
+    titleColor = blueWon ? '#3a86ff'  : '#ff4444';
+    sub        = `P1: ${ab} alive  •  P2: ${ar} alive`;
+  } else {
+    title      = blueWon ? 'YOU WIN!' : 'YOU LOSE!';
+    titleColor = blueWon ? '#00ff88'  : '#ff4444';
+    sub        = `Blue: ${ab} alive  •  Red: ${ar} alive`;
+  }
+  drawOverlay(title, titleColor, sub);
+
+  const cx = CW / 2, cy = CH / 2;
+  playBtn.w = Math.min(220, CW * 0.5);
+  playBtn.h = Math.max(46, CH * 0.07);
+  playBtn.x = cx - playBtn.w / 2;
+  playBtn.y = cy + CH * 0.04;
+
+  ctx.fillStyle = '#3a86ff';
+  rr(playBtn.x, playBtn.y, playBtn.w, playBtn.h, 10);
+  ctx.fill();
+  ctx.fillStyle    = '#ffffff';
+  ctx.font         = `bold ${Math.max(16, Math.round(CH * 0.032))}px Arial`;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('PLAY AGAIN', cx, playBtn.y + playBtn.h / 2);
 }
 
 // ── Game Loop ─────────────────────────────────────────────────────────────────
@@ -907,8 +1012,6 @@ function loop(ts) {
 
 window.addEventListener('resize', resize);
 resize();
-btnX = CW / 2 - 110;
-btnY = CH / 2 + CH * 0.02;
 requestAnimationFrame(ts => { lastTs = ts; loop(ts); });
 </script>
 </body>

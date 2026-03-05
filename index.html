@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Dodgeball</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: #1a1a2e;
+      font-family: Arial, sans-serif;
+    }
+    canvas {
+      display: block;
+      touch-action: none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+'use strict';
+
+// ─── Canvas Setup ────────────────────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+let canvasW, canvasH;
+let courtX, courtY, courtW, courtH;
+let PLAYER_RADIUS, BALL_RADIUS, DODGE_DISTANCE, HIT_TOLERANCE;
+
+function resize() {
+  canvasW = canvas.width = window.innerWidth;
+  canvasH = canvas.height = window.innerHeight;
+  courtX = canvasW * 0.05;
+  courtY = canvasH * 0.12;
+  courtW = canvasW * 0.90;
+  courtH = canvasH * 0.74;
+  PLAYER_RADIUS = Math.max(16, Math.min(canvasW, canvasH) * 0.028);
+  BALL_RADIUS = PLAYER_RADIUS * 0.5;
+  DODGE_DISTANCE = PLAYER_RADIUS * 3.2;
+  HIT_TOLERANCE = PLAYER_RADIUS * 1.6;
+  if (game.phase !== 'MENU' && game.phase !== 'GAME_OVER') {
+    initPositions();
+  }
+}
+
+// ─── CONFIG ──────────────────────────────────────────────────────────────────
+const CFG = {
+  ATTACK_FLIGHT_MS: 800,
+  DEFENSE_FLIGHT_MS: 1300,
+  WARNING_MS: 1600,
+  DODGE_DURATION_MS: 320,
+  DODGE_RETURN_MS: 520,
+  AI_DODGE_BASE: 0.52,
+  SWIPE_THRESHOLD_PX: 28,
+  SWIPE_TIME_WINDOW_MS: 500,
+  RESULT_DISPLAY_MS: 1100,
+  HIT_FLASH_MS: 350,
+  ARC_HEIGHT: -90,
+};
+
+// ─── Player ───────────────────────────────────────────────────────────────────
+class Player {
+  constructor(x, y, team, index) {
+    this.baseX = this.x = x;
+    this.baseY = this.y = y;
+    this.team = team;
+    this.index = index;
+    this.alive = true;
+    this.selected = false;
+    this.hitFlash = 0;
+    this.isDodging = false;
+    this.dodgeTargetX = x;
+    this.dodgeTargetY = y;
+    this.dodgeTimer = 0;
+    this.returning = false;
+    this.returnTimer = 0;
+  }
+
+  get radius() { return PLAYER_RADIUS; }
+}
+
+// ─── Ball ─────────────────────────────────────────────────────────────────────
+class Ball {
+  constructor(from, to, duration) {
+    this.startX = from.x;
+    this.startY = from.y;
+    this.endX = to.x;
+    this.endY = to.y;
+    this.x = from.x;
+    this.y = from.y;
+    this.t = 0;
+    this.duration = duration;
+    this.targetPlayer = to;
+    this.trail = [];
+    // control point
+    this.cpX = (from.x + to.x) / 2;
+    this.cpY = (from.y + to.y) / 2 + CFG.ARC_HEIGHT;
+  }
+}
+
+// ─── Game State ───────────────────────────────────────────────────────────────
+const game = {
+  phase: 'MENU',
+  players: [],
+  aiPlayers: [],
+  ball: null,
+  selectedThrower: null,
+  warningTarget: null,
+  warningTimer: 0,
+  swipeDetected: false,
+  swipeDir: null,
+  resultMsg: '',
+  resultTimer: 0,
+  resultColor: '#ff4444',
+  turnCount: 0,
+  lastTurn: 'ai', // ai went last → player goes first
+};
+
+// ─── Positions ────────────────────────────────────────────────────────────────
+function initPositions() {
+  const ySlots = [0.22, 0.50, 0.78];
+  game.players.forEach((p, i) => {
+    p.baseX = p.x = courtX + courtW * 0.18;
+    p.baseY = p.y = courtY + courtH * ySlots[i];
+    p.dodgeTargetX = p.x;
+    p.dodgeTargetY = p.y;
+  });
+  game.aiPlayers.forEach((p, i) => {
+    p.baseX = p.x = courtX + courtW * 0.82;
+    p.baseY = p.y = courtY + courtH * ySlots[i];
+    p.dodgeTargetX = p.x;
+    p.dodgeTargetY = p.y;
+  });
+}
+
+function initGame() {
+  game.players = [0,1,2].map(i => new Player(0, 0, 'blue', i));
+  game.aiPlayers = [0,1,2].map(i => new Player(0, 0, 'red', i));
+  game.ball = null;
+  game.selectedThrower = null;
+  game.warningTarget = null;
+  game.warningTimer = 0;
+  game.swipeDetected = false;
+  game.resultMsg = '';
+  game.resultTimer = 0;
+  game.turnCount = 0;
+  game.lastTurn = 'ai';
+  initPositions();
+  transitionTo('PLAYER_SELECT_THROWER');
+}
+
+// ─── State Machine ────────────────────────────────────────────────────────────
+function transitionTo(phase) {
+  game.phase = phase;
+
+  if (phase === 'PLAYER_SELECT_THROWER') {
+    game.ball = null;
+    game.selectedThrower = null;
+    game.players.forEach(p => p.selected = false);
+    // Auto-select if only one alive
+    const alive = game.players.filter(p => p.alive);
+    if (alive.length === 1) {
+      game.selectedThrower = alive[0];
+      alive[0].selected = true;
+      transitionTo('PLAYER_SELECT_TARGET');
+    }
+  }
+
+  if (phase === 'AI_WARNING') {
+    const alivePlayers = game.players.filter(p => p.alive);
+    // AI picks target
+    const target = Math.random() < 0.7
+      ? alivePlayers[0]
+      : alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
+    game.warningTarget = target;
+    game.warningTimer = CFG.WARNING_MS;
+    game.swipeDetected = false;
+    game.swipeDir = null;
+  }
+
+  if (phase === 'GAME_OVER') {
+    game.ball = null;
+  }
+}
+
+// ─── AI Dodge Decision ────────────────────────────────────────────────────────
+function aiDodgeDecision(aiPlayer) {
+  const rate = Math.min(0.78, CFG.AI_DODGE_BASE + game.turnCount * 0.015);
+  if (Math.random() < rate) {
+    const dir = Math.random() < 0.5 ? -1 : 1;
+    aiPlayer.dodgeTargetY = aiPlayer.baseY + dir * DODGE_DISTANCE;
+    // clamp inside court
+    aiPlayer.dodgeTargetY = Math.max(courtY + PLAYER_RADIUS, Math.min(courtY + courtH - PLAYER_RADIUS, aiPlayer.dodgeTargetY));
+    aiPlayer.isDodging = true;
+    aiPlayer.dodgeTimer = CFG.DODGE_DURATION_MS;
+    aiPlayer.returning = false;
+  }
+}
+
+// ─── Launch AI Ball ───────────────────────────────────────────────────────────
+function launchAiBall() {
+  const target = game.warningTarget;
+  const aliveAi = game.aiPlayers.filter(p => p.alive);
+  // pick thrower closest in Y to target
+  const thrower = aliveAi.reduce((best, p) =>
+    Math.abs(p.y - target.y) < Math.abs(best.y - target.y) ? p : best
+  );
+  game.ball = new Ball(thrower, target, CFG.DEFENSE_FLIGHT_MS);
+  game.lastTurn = 'ai';
+  game.turnCount++;
+}
+
+// ─── Launch Player Ball ───────────────────────────────────────────────────────
+function launchPlayerBall(thrower, target) {
+  game.ball = new Ball(thrower, target, CFG.ATTACK_FLIGHT_MS);
+  // AI dodge fires immediately
+  aiDodgeDecision(target);
+  game.lastTurn = 'player';
+  game.turnCount++;
+  transitionTo('BALL_FLYING_ATTACK');
+}
+
+// ─── Bezier helpers ───────────────────────────────────────────────────────────
+function easeInOutQuad(t) {
+  return t < 0.5 ? 2*t*t : -1 + (4 - 2*t)*t;
+}
+function bezier(p0, p1, p2, t) {
+  return (1-t)*(1-t)*p0 + 2*(1-t)*t*p1 + t*t*p2;
+}
+
+// ─── Update ───────────────────────────────────────────────────────────────────
+let lastTime = 0;
+
+function update(dt) {
+  const p = game.phase;
+
+  // Decay hit flashes
+  [...game.players, ...game.aiPlayers].forEach(pl => {
+    if (pl.hitFlash > 0) pl.hitFlash -= dt;
+  });
+
+  // Result timer ticks in CHECK_WIN
+  if (game.resultTimer > 0) game.resultTimer -= dt;
+
+  // Dodge animations for all players
+  [...game.players, ...game.aiPlayers].forEach(pl => updateDodge(pl, dt));
+
+  if (p === 'BALL_FLYING_ATTACK') {
+    advanceBall(dt);
+    if (game.ball.t >= 1.0) {
+      resolveAttack();
+    }
+
+  } else if (p === 'BALL_FLYING_DEFENSE') {
+    advanceBall(dt);
+    if (game.ball.t >= 1.0) {
+      resolveDefense();
+    }
+
+  } else if (p === 'AI_WARNING') {
+    game.warningTimer -= dt;
+    if (game.warningTimer <= 0) {
+      launchAiBall();
+      transitionTo('BALL_FLYING_DEFENSE');
+    }
+
+  } else if (p === 'CHECK_WIN') {
+    if (game.resultTimer <= 0) {
+      const aiAlive = game.aiPlayers.filter(x => x.alive).length;
+      const plAlive = game.players.filter(x => x.alive).length;
+      if (aiAlive === 0) {
+        transitionTo('GAME_OVER');
+        game.winSide = 'blue';
+      } else if (plAlive === 0) {
+        transitionTo('GAME_OVER');
+        game.winSide = 'red';
+      } else {
+        // alternate turns
+        if (game.lastTurn === 'player') {
+          transitionTo('AI_WARNING');
+        } else {
+          transitionTo('PLAYER_SELECT_THROWER');
+        }
+      }
+    }
+  }
+}
+
+function advanceBall(dt) {
+  const b = game.ball;
+  b.t += dt / b.duration;
+  b.t = Math.min(b.t, 1.0);
+  const et = easeInOutQuad(b.t);
+  b.trail.push({ x: b.x, y: b.y });
+  if (b.trail.length > 8) b.trail.shift();
+  b.x = bezier(b.startX, b.cpX, b.endX, et);
+  b.y = bezier(b.startY, b.cpY, b.endY, et);
+}
+
+function updateDodge(pl, dt) {
+  if (pl.isDodging) {
+    const speed = dt / CFG.DODGE_DURATION_MS;
+    pl.x += (pl.dodgeTargetX - pl.x) * Math.min(1, speed * 6);
+    pl.y += (pl.dodgeTargetY - pl.y) * Math.min(1, speed * 6);
+    pl.dodgeTimer -= dt;
+    if (pl.dodgeTimer <= 0) {
+      pl.isDodging = false;
+      pl.returning = true;
+      pl.returnTimer = CFG.DODGE_RETURN_MS;
+    }
+  } else if (pl.returning) {
+    const speed = dt / CFG.DODGE_RETURN_MS;
+    pl.x += (pl.baseX - pl.x) * Math.min(1, speed * 4);
+    pl.y += (pl.baseY - pl.y) * Math.min(1, speed * 4);
+    pl.returnTimer -= dt;
+    if (pl.returnTimer <= 0) {
+      pl.x = pl.baseX;
+      pl.y = pl.baseY;
+      pl.returning = false;
+    }
+  }
+}
+
+function resolveAttack() {
+  const b = game.ball;
+  const target = b.targetPlayer;
+  const dx = b.x - target.x;
+  const dy = b.y - target.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  const hit = dist < HIT_TOLERANCE && target.alive;
+
+  if (hit) {
+    target.alive = false;
+    target.hitFlash = CFG.HIT_FLASH_MS;
+    game.resultMsg = 'HIT!';
+    game.resultColor = '#ff4444';
+  } else {
+    game.resultMsg = 'DODGED!';
+    game.resultColor = '#00ff88';
+  }
+  game.resultTimer = CFG.RESULT_DISPLAY_MS;
+  game.ball = null;
+  game.players.forEach(p => p.selected = false);
+  transitionTo('CHECK_WIN');
+}
+
+function resolveDefense() {
+  const b = game.ball;
+  const target = b.targetPlayer;
+  const dx = b.x - target.x;
+  const dy = b.y - target.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  const hit = dist < HIT_TOLERANCE && target.alive;
+
+  if (hit) {
+    target.alive = false;
+    target.hitFlash = CFG.HIT_FLASH_MS;
+    game.resultMsg = 'HIT!';
+    game.resultColor = '#ff4444';
+  } else {
+    game.resultMsg = game.swipeDetected ? 'DODGED!' : 'MISS!';
+    game.resultColor = '#00ff88';
+  }
+  game.resultTimer = CFG.RESULT_DISPLAY_MS;
+  game.ball = null;
+  game.swipeDetected = false;
+  transitionTo('CHECK_WIN');
+}
+
+// ─── Touch / Mouse Input ──────────────────────────────────────────────────────
+const pointer = { down: false, startX: 0, startY: 0, startTime: 0, x: 0, y: 0 };
+
+function getCoords(e) {
+  const r = canvas.getBoundingClientRect();
+  if (e.touches && e.touches.length > 0) {
+    return { x: e.touches[0].clientX - r.left, y: e.touches[0].clientY - r.top };
+  }
+  if (e.changedTouches && e.changedTouches.length > 0) {
+    return { x: e.changedTouches[0].clientX - r.left, y: e.changedTouches[0].clientY - r.top };
+  }
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+function hitPlayer(px, py, player) {
+  if (!player.alive) return false;
+  const dx = px - player.x, dy = py - player.y;
+  return Math.sqrt(dx*dx + dy*dy) < player.radius * 1.6;
+}
+
+function onPointerDown(e) {
+  e.preventDefault();
+  const { x, y } = getCoords(e);
+  pointer.down = true;
+  pointer.startX = pointer.x = x;
+  pointer.startY = pointer.y = y;
+  pointer.startTime = Date.now();
+
+  const ph = game.phase;
+
+  if (ph === 'MENU' || ph === 'GAME_OVER') {
+    // check button tap
+    if (isButtonHit(x, y)) {
+      if (ph === 'MENU') {
+        initGame();
+      } else {
+        initGame();
+      }
+    }
+    return;
+  }
+
+  if (ph === 'PLAYER_SELECT_THROWER') {
+    for (const p of game.players) {
+      if (hitPlayer(x, y, p)) {
+        game.players.forEach(q => q.selected = false);
+        p.selected = true;
+        game.selectedThrower = p;
+        transitionTo('PLAYER_SELECT_TARGET');
+        break;
+      }
+    }
+    return;
+  }
+
+  if (ph === 'PLAYER_SELECT_TARGET') {
+    // tap enemy → throw
+    for (const p of game.aiPlayers) {
+      if (hitPlayer(x, y, p)) {
+        launchPlayerBall(game.selectedThrower, p);
+        return;
+      }
+    }
+    // tap own player → change thrower
+    for (const p of game.players) {
+      if (hitPlayer(x, y, p)) {
+        game.players.forEach(q => q.selected = false);
+        p.selected = true;
+        game.selectedThrower = p;
+        return;
+      }
+    }
+  }
+}
+
+function onPointerMove(e) {
+  e.preventDefault();
+  const { x, y } = getCoords(e);
+  pointer.x = x;
+  pointer.y = y;
+}
+
+function onPointerUp(e) {
+  e.preventDefault();
+  if (!pointer.down) return;
+  pointer.down = false;
+
+  const { x, y } = getCoords(e);
+  const dx = x - pointer.startX;
+  const dy = y - pointer.startY;
+  const elapsed = Date.now() - pointer.startTime;
+
+  if (game.phase === 'BALL_FLYING_DEFENSE' || game.phase === 'AI_WARNING') {
+    // Swipe detection
+    if (Math.abs(dx) > CFG.SWIPE_THRESHOLD_PX && elapsed < CFG.SWIPE_TIME_WINDOW_MS) {
+      const dir = dx < 0 ? -1 : 1;
+      const target = game.warningTarget;
+      if (target && target.alive) {
+        game.swipeDetected = true;
+        game.swipeDir = dx < 0 ? 'left' : 'right';
+        // Apply dodge
+        target.dodgeTargetY = target.baseY + dir * DODGE_DISTANCE;
+        target.dodgeTargetY = Math.max(courtY + PLAYER_RADIUS, Math.min(courtY + courtH - PLAYER_RADIUS, target.dodgeTargetY));
+        target.dodgeTargetX = target.baseX;
+        target.isDodging = true;
+        target.dodgeTimer = CFG.DODGE_DURATION_MS;
+        target.returning = false;
+      }
+    }
+  }
+}
+
+// button bounds (computed in render)
+let btnX, btnY, btnW, btnH;
+function isButtonHit(x, y) {
+  return x >= btnX && x <= btnX + btnW && y >= btnY && y <= btnY + btnH;
+}
+
+canvas.addEventListener('touchstart', onPointerDown, { passive: false });
+canvas.addEventListener('touchmove', onPointerMove, { passive: false });
+canvas.addEventListener('touchend', onPointerUp, { passive: false });
+canvas.addEventListener('mousedown', onPointerDown);
+canvas.addEventListener('mousemove', onPointerMove);
+canvas.addEventListener('mouseup', onPointerUp);
+
+// ─── Rendering ────────────────────────────────────────────────────────────────
+function render() {
+  ctx.clearRect(0, 0, canvasW, canvasH);
+
+  // Background
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, canvasW, canvasH);
+
+  drawCourt();
+
+  // Ball trail + ball
+  if (game.ball) {
+    drawBallTrail(game.ball);
+    drawBall(game.ball);
+  }
+
+  // Players (dead ones faded)
+  [...game.aiPlayers, ...game.players].forEach(p => drawPlayer(p));
+
+  // Selection ring
+  if (game.phase === 'PLAYER_SELECT_THROWER' || game.phase === 'PLAYER_SELECT_TARGET') {
+    game.players.filter(p => p.selected && p.alive).forEach(p => drawSelectionRing(p));
+  }
+
+  // Trajectory arc
+  if (game.phase === 'PLAYER_SELECT_TARGET' && game.selectedThrower) {
+    // show arcs to all alive enemies (highlight on hover)
+    game.aiPlayers.filter(p => p.alive).forEach(p => {
+      const dx = pointer.x - p.x, dy = pointer.y - p.y;
+      const near = Math.sqrt(dx*dx + dy*dy) < p.radius * 2;
+      drawArc(game.selectedThrower, p, near ? 0.8 : 0.25);
+    });
+  }
+
+  // Warning ring
+  if ((game.phase === 'AI_WARNING' || game.phase === 'BALL_FLYING_DEFENSE') && game.warningTarget) {
+    drawWarningRing(game.warningTarget);
+  }
+
+  drawUI();
+
+  // Result flash
+  if (game.resultMsg && game.resultTimer > 0) {
+    drawResult();
+  }
+
+  // Overlays
+  if (game.phase === 'MENU') drawMenu();
+  if (game.phase === 'GAME_OVER') drawGameOver();
+}
+
+function drawCourt() {
+  // Court fill
+  ctx.fillStyle = '#2d6b26';
+  roundRect(courtX, courtY, courtW, courtH, 12);
+  ctx.fill();
+
+  // Court border
+  ctx.strokeStyle = 'rgba(255,255,255,0.65)';
+  ctx.lineWidth = 3;
+  roundRect(courtX, courtY, courtW, courtH, 12);
+  ctx.stroke();
+
+  // Center line (vertical)
+  const cx = courtX + courtW / 2;
+  ctx.setLineDash([10, 8]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx, courtY + 10);
+  ctx.lineTo(cx, courtY + courtH - 10);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Center circle
+  ctx.beginPath();
+  ctx.arc(cx, courtY + courtH / 2, 28, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Court labels
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.font = `bold ${Math.max(14, PLAYER_RADIUS * 0.8)}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('YOUR TEAM', courtX + courtW * 0.25, courtY + courtH * 0.5);
+  ctx.fillText('OPPONENTS', courtX + courtW * 0.75, courtY + courtH * 0.5);
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawPlayer(player) {
+  const alpha = player.alive ? 1.0 : 0.0;
+  if (alpha === 0) return;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  // Shadow
+  ctx.shadowColor = 'rgba(0,0,0,0.5)';
+  ctx.shadowBlur = 10;
+
+  // Body
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+
+  let color = player.team === 'blue' ? '#3a86ff' : '#ff4444';
+  if (player.hitFlash > 0) color = '#ffffff';
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  ctx.shadowBlur = 0;
+
+  // Shine
+  const grad = ctx.createRadialGradient(
+    player.x - player.radius * 0.3, player.y - player.radius * 0.35, player.radius * 0.1,
+    player.x, player.y, player.radius
+  );
+  grad.addColorStop(0, 'rgba(255,255,255,0.35)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Jersey number
+  ctx.fillStyle = 'white';
+  ctx.font = `bold ${Math.round(player.radius * 0.78)}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(player.index + 1, player.x, player.y + 1);
+
+  ctx.restore();
+}
+
+function drawSelectionRing(player) {
+  const pulse = (Math.sin(Date.now() / 180) + 1) / 2;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.radius + 5 + pulse * 4, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(255, 190, 11, ${0.7 + pulse * 0.3})`;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+}
+
+function drawWarningRing(player) {
+  const pulse = (Math.sin(Date.now() / 90) + 1) / 2;
+  const ringR = player.radius + 8 + pulse * 10;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, ringR, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(255, 60, 60, ${0.6 + pulse * 0.4})`;
+  ctx.lineWidth = 4;
+  ctx.stroke();
+
+  // "DODGE!" label
+  ctx.fillStyle = `rgba(255,80,80,${0.8 + pulse * 0.2})`;
+  ctx.font = `bold ${Math.round(PLAYER_RADIUS * 0.75)}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('SWIPE!', player.x, player.y - player.radius - 8);
+}
+
+function drawBallTrail(ball) {
+  ball.trail.forEach((pos, i) => {
+    const alpha = (i / ball.trail.length) * 0.45;
+    const r = BALL_RADIUS * (0.4 + 0.6 * (i / ball.trail.length));
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(220,220,255,${alpha})`;
+    ctx.fill();
+  });
+}
+
+function drawBall(ball) {
+  ctx.shadowColor = 'rgba(255,255,255,0.6)';
+  ctx.shadowBlur = 12;
+
+  const grad = ctx.createRadialGradient(
+    ball.x - BALL_RADIUS * 0.3, ball.y - BALL_RADIUS * 0.35, 1,
+    ball.x, ball.y, BALL_RADIUS
+  );
+  grad.addColorStop(0, '#ffffff');
+  grad.addColorStop(0.6, '#dddddd');
+  grad.addColorStop(1, '#aaaaaa');
+
+  ctx.beginPath();
+  ctx.arc(ball.x, ball.y, BALL_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+}
+
+function drawArc(from, to, opacity) {
+  const cpX = (from.x + to.x) / 2;
+  const cpY = (from.y + to.y) / 2 + CFG.ARC_HEIGHT;
+  const steps = 22;
+
+  ctx.save();
+  ctx.setLineDash([7, 6]);
+  ctx.strokeStyle = `rgba(255, 255, 255, ${opacity})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const x = bezier(from.x, cpX, to.x, t);
+    const y = bezier(from.y, cpY, to.y, t);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawUI() {
+  const fontSize = Math.max(13, Math.round(canvasH * 0.022));
+  const phaseSize = Math.max(14, Math.round(canvasH * 0.026));
+
+  // Score bar background
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(0, 0, canvasW, courtY - 2);
+
+  // Blue score (left)
+  const aliveBlue = game.players.filter(p => p.alive).length;
+  const aliveRed = game.aiPlayers.filter(p => p.alive).length;
+
+  // Blue team icons
+  ctx.fillStyle = '#3a86ff';
+  ctx.font = `bold ${phaseSize}px Arial`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`🔵 YOU: ${aliveBlue}/3`, 14, courtY / 2);
+
+  // Red team icons
+  ctx.fillStyle = '#ff4444';
+  ctx.textAlign = 'right';
+  ctx.fillText(`${aliveRed}/3 :THEM 🔴`, canvasW - 14, courtY / 2);
+
+  // Phase message
+  let phaseMsg = '';
+  let hint = '';
+  const ph = game.phase;
+  if (ph === 'PLAYER_SELECT_THROWER') {
+    phaseMsg = 'YOUR TURN';
+    hint = 'Tap one of your players to select them';
+  } else if (ph === 'PLAYER_SELECT_TARGET') {
+    phaseMsg = 'SELECT TARGET';
+    hint = 'Tap an enemy to throw!';
+  } else if (ph === 'BALL_FLYING_ATTACK') {
+    phaseMsg = 'THROWING...';
+    hint = '';
+  } else if (ph === 'AI_WARNING') {
+    phaseMsg = '⚠ INCOMING!';
+    hint = 'Swipe the highlighted player to dodge!';
+  } else if (ph === 'BALL_FLYING_DEFENSE') {
+    phaseMsg = 'DODGE!';
+    hint = game.swipeDetected ? 'Dodging!' : 'Swipe now!';
+  } else if (ph === 'CHECK_WIN') {
+    phaseMsg = '';
+    hint = '';
+  }
+
+  if (phaseMsg) {
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.font = `bold ${phaseSize}px Arial`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(phaseMsg, canvasW / 2, courtY / 2);
+  }
+
+  // Bottom hint bar
+  if (hint) {
+    const barY = courtY + courtH + 4;
+    const barH = canvasH - barY;
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(0, barY, canvasW, barH);
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font = `${fontSize}px Arial`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(hint, canvasW / 2, barY + barH / 2);
+  }
+
+  // Countdown arc during AI_WARNING
+  if (ph === 'AI_WARNING') {
+    const barY = courtY + courtH + 4;
+    const barH = canvasH - barY;
+    const cx = canvasW / 2;
+    const cy = barY + barH / 2;
+    const fraction = game.warningTimer / CFG.WARNING_MS;
+
+    ctx.beginPath();
+    ctx.arc(cx - Math.min(barH, 30) * 3.5, cy, Math.min(barH * 0.4, 16), -Math.PI / 2, -Math.PI / 2 + fraction * Math.PI * 2);
+    ctx.strokeStyle = '#ff4444';
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+}
+
+function drawResult() {
+  const alpha = Math.min(1, game.resultTimer / (CFG.RESULT_DISPLAY_MS * 0.3));
+  const size = Math.max(28, Math.round(canvasH * 0.06));
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = `bold ${size}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = game.resultColor;
+  ctx.shadowColor = 'rgba(0,0,0,0.8)';
+  ctx.shadowBlur = 8;
+  ctx.fillText(game.resultMsg, canvasW / 2, courtY + courtH / 2);
+  ctx.restore();
+}
+
+function drawOverlay(title, titleColor, subtitle, btnLabel) {
+  // Dark overlay
+  ctx.fillStyle = 'rgba(10,10,30,0.82)';
+  ctx.fillRect(0, 0, canvasW, canvasH);
+
+  const cxM = canvasW / 2;
+  const cyM = canvasH / 2;
+
+  // Title
+  const titleSize = Math.max(32, Math.round(canvasH * 0.075));
+  ctx.fillStyle = titleColor;
+  ctx.font = `bold ${titleSize}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0,0,0,0.8)';
+  ctx.shadowBlur = 12;
+  ctx.fillText(title, cxM, cyM - canvasH * 0.15);
+  ctx.shadowBlur = 0;
+
+  // Subtitle
+  const subSize = Math.max(14, Math.round(canvasH * 0.028));
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.font = `${subSize}px Arial`;
+  ctx.fillText(subtitle, cxM, cyM - canvasH * 0.07);
+
+  // Button
+  btnW = Math.min(220, canvasW * 0.5);
+  btnH = Math.max(46, canvasH * 0.07);
+  btnX = cxM - btnW / 2;
+  btnY = cyM + canvasH * 0.02;
+
+  ctx.fillStyle = '#3a86ff';
+  roundRect(btnX, btnY, btnW, btnH, 10);
+  ctx.fill();
+
+  const btnTextSize = Math.max(16, Math.round(canvasH * 0.032));
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `bold ${btnTextSize}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(btnLabel, cxM, btnY + btnH / 2);
+}
+
+function drawMenu() {
+  drawOverlay(
+    'DODGEBALL',
+    '#ffffff',
+    '3v3 • Tap enemies to throw • Swipe to dodge',
+    'START GAME'
+  );
+
+  // Extra instructions
+  const infoSize = Math.max(12, Math.round(canvasH * 0.022));
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = `${infoSize}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('When warned, swipe your player left or right!', canvasW / 2, btnY + btnH + Math.max(24, canvasH * 0.05));
+}
+
+function drawGameOver() {
+  const won = game.winSide === 'blue';
+  const aliveBlue = game.players.filter(p => p.alive).length;
+  const aliveRed = game.aiPlayers.filter(p => p.alive).length;
+  drawOverlay(
+    won ? 'YOU WIN!' : 'YOU LOSE!',
+    won ? '#00ff88' : '#ff4444',
+    `Blue: ${aliveBlue} left  •  Red: ${aliveRed} left`,
+    'PLAY AGAIN'
+  );
+}
+
+// ─── Game Loop ────────────────────────────────────────────────────────────────
+function gameLoop(timestamp) {
+  const dt = Math.min(timestamp - lastTime, 50);
+  lastTime = timestamp;
+  update(dt);
+  render();
+  requestAnimationFrame(gameLoop);
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', resize);
+resize();
+
+// Set initial button bounds roughly so menu tap works before first render
+btnW = 220; btnH = 55;
+btnX = canvasW / 2 - 110;
+btnY = canvasH / 2 + canvasH * 0.02;
+
+requestAnimationFrame(ts => { lastTime = ts; gameLoop(ts); });
+</script>
+</body>
+</html>

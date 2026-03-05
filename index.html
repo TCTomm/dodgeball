@@ -8,16 +8,8 @@
   <title>Dodgeball</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body {
-      width: 100%; height: 100%;
-      overflow: hidden;
-      background: #1a1a2e;
-      font-family: Arial, sans-serif;
-    }
-    canvas {
-      display: block;
-      touch-action: none;
-    }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0f0f1a; }
+    canvas { display: block; touch-action: none; }
   </style>
 </head>
 <body>
@@ -25,895 +17,898 @@
 <script>
 'use strict';
 
-// ─── Canvas Setup ────────────────────────────────────────────────────────────
 const canvas = document.getElementById('gameCanvas');
-const ctx = canvas.getContext('2d');
+const ctx    = canvas.getContext('2d');
 
-let canvasW, canvasH;
-let courtX, courtY, courtW, courtH;
-let PLAYER_RADIUS, BALL_RADIUS, DODGE_DISTANCE, HIT_TOLERANCE;
+// Layout globals
+let CW, CH, crtX, crtY, crtW, crtH, midX, PR, BR;
 
 function resize() {
-  canvasW = canvas.width = window.innerWidth;
-  canvasH = canvas.height = window.innerHeight;
-  courtX = canvasW * 0.05;
-  courtY = canvasH * 0.12;
-  courtW = canvasW * 0.90;
-  courtH = canvasH * 0.74;
-  PLAYER_RADIUS = Math.max(16, Math.min(canvasW, canvasH) * 0.028);
-  BALL_RADIUS = PLAYER_RADIUS * 0.5;
-  DODGE_DISTANCE = PLAYER_RADIUS * 3.2;
-  HIT_TOLERANCE = PLAYER_RADIUS * 1.6;
+  CW = canvas.width  = window.innerWidth;
+  CH = canvas.height = window.innerHeight;
+  crtX = CW * 0.04;
+  crtY = CH * 0.115;
+  crtW = CW * 0.92;
+  crtH = CH * 0.755;
+  midX = crtX + crtW / 2;
+  PR = Math.max(16, Math.min(CW, CH) * 0.028);
+  BR = PR * 0.48;
   if (game.phase !== 'MENU' && game.phase !== 'GAME_OVER') {
-    initPositions();
+    game.players.concat(game.aiPlayers).forEach(p => p.clamp());
   }
 }
 
-// ─── CONFIG ──────────────────────────────────────────────────────────────────
-const CFG = {
-  ATTACK_FLIGHT_MS: 800,
-  DEFENSE_FLIGHT_MS: 1300,
-  WARNING_MS: 1600,
-  DODGE_DURATION_MS: 320,
-  DODGE_RETURN_MS: 520,
-  AI_DODGE_BASE: 0.52,
-  SWIPE_THRESHOLD_PX: 28,
-  SWIPE_TIME_WINDOW_MS: 500,
-  RESULT_DISPLAY_MS: 1100,
-  HIT_FLASH_MS: 350,
-  ARC_HEIGHT: -90,
+// ── Config ────────────────────────────────────────────────────────────────────
+const C = {
+  SLING_MIN_PX:  18,    // min pull distance to register a throw
+  SLING_MAX_PX:  90,    // pull distance for maximum speed
+  SPD_MIN:      340,
+  SPD_MAX:      900,
+  WINDUP_MS:   2100,    // AI wind-up before throw
+  AI_SPREAD:   0.24,    // radians of random spread on AI throw
+  AI_BASE_SPD: 540,
+  AI_SPD_VAR:  120,
+  AI_MOVE_PX:  135,     // px/s AI wander speed
+  AI_FAST_MUL:  2.2,    // speed multiplier when winding up
+  RESULT_MS:    950,
+  FLASH_MS:     380,
+  DODGE_REACT:  300,    // ms before AI reacts to incoming ball
 };
 
-// ─── Player ───────────────────────────────────────────────────────────────────
+// ── Player ────────────────────────────────────────────────────────────────────
 class Player {
-  constructor(x, y, team, index) {
-    this.baseX = this.x = x;
-    this.baseY = this.y = y;
+  constructor(x, y, team, idx) {
+    this.x = x; this.y = y;
     this.team = team;
-    this.index = index;
+    this.idx  = idx;
     this.alive = true;
-    this.selected = false;
-    this.hitFlash = 0;
-    this.isDodging = false;
-    this.dodgeTargetX = x;
-    this.dodgeTargetY = y;
-    this.dodgeTimer = 0;
-    this.returning = false;
-    this.returnTimer = 0;
+    this.flash = 0;
+    // AI roam state
+    this.tx = x; this.ty = y;   // current move target
+    this.mt = 0;                 // move timer (ms until new target)
+    this.winding = false;        // is this AI player winding up a throw?
   }
 
-  get radius() { return PLAYER_RADIUS; }
+  get r() { return PR; }
+
+  zone() {
+    const p = PR + 4;
+    return this.team === 'blue'
+      ? { x0: crtX + p,    x1: midX - p,        y0: crtY + p, y1: crtY + crtH - p }
+      : { x0: midX + p,    x1: crtX + crtW - p,  y0: crtY + p, y1: crtY + crtH - p };
+  }
+
+  clamp() {
+    const z = this.zone();
+    this.x = Math.max(z.x0, Math.min(z.x1, this.x));
+    this.y = Math.max(z.y0, Math.min(z.y1, this.y));
+  }
+
+  clampTarget() {
+    const z = this.zone();
+    this.tx = Math.max(z.x0, Math.min(z.x1, this.tx));
+    this.ty = Math.max(z.y0, Math.min(z.y1, this.ty));
+  }
 }
 
-// ─── Ball ─────────────────────────────────────────────────────────────────────
+// ── Ball ──────────────────────────────────────────────────────────────────────
 class Ball {
-  constructor(from, to, duration) {
-    this.startX = from.x;
-    this.startY = from.y;
-    this.endX = to.x;
-    this.endY = to.y;
-    this.x = from.x;
-    this.y = from.y;
-    this.t = 0;
-    this.duration = duration;
-    this.targetPlayer = to;
+  constructor(x, y, vx, vy, from) {
+    this.x = x; this.y = y;
+    this.vx = vx; this.vy = vy;
+    this.from = from;   // 'blue' | 'red'
     this.trail = [];
-    // control point
-    this.cpX = (from.x + to.x) / 2;
-    this.cpY = (from.y + to.y) / 2 + CFG.ARC_HEIGHT;
+    this.age = 0;
   }
 }
 
-// ─── Game State ───────────────────────────────────────────────────────────────
+// ── Game State ────────────────────────────────────────────────────────────────
 const game = {
-  phase: 'MENU',
-  players: [],
-  aiPlayers: [],
-  ball: null,
-  selectedThrower: null,
-  warningTarget: null,
-  warningTimer: 0,
-  swipeDetected: false,
-  swipeDir: null,
-  resultMsg: '',
+  phase:       'MENU',
+  players:     [],
+  aiPlayers:   [],
+  ball:        null,
+  effects:     [],
+  resultMsg:   '',
   resultTimer: 0,
-  resultColor: '#ff4444',
-  turnCount: 0,
-  lastTurn: 'ai', // ai went last → player goes first
+  resultColor: '#fff',
+  winSide:     null,
+  windupTimer: 0,
+  aiThrower:   null,
+  aiTarget:    null,
+  lastThrower: null,   // 'player' | 'ai' — who threw last
 };
 
-// ─── Positions ────────────────────────────────────────────────────────────────
-function initPositions() {
-  const ySlots = [0.22, 0.50, 0.78];
-  game.players.forEach((p, i) => {
-    p.baseX = p.x = courtX + courtW * 0.18;
-    p.baseY = p.y = courtY + courtH * ySlots[i];
-    p.dodgeTargetX = p.x;
-    p.dodgeTargetY = p.y;
-  });
-  game.aiPlayers.forEach((p, i) => {
-    p.baseX = p.x = courtX + courtW * 0.82;
-    p.baseY = p.y = courtY + courtH * ySlots[i];
-    p.dodgeTargetX = p.x;
-    p.dodgeTargetY = p.y;
-  });
-}
+// ── Slingshot drag state ──────────────────────────────────────────────────────
+const sl = { on: false, player: null, ox: 0, oy: 0, dx: 0, dy: 0 };
 
+// ── Move drag state (defend phase) ───────────────────────────────────────────
+const mv = { on: false, player: null, offX: 0, offY: 0 };
+
+// ── Init / State Transitions ──────────────────────────────────────────────────
 function initGame() {
-  game.players = [0,1,2].map(i => new Player(0, 0, 'blue', i));
-  game.aiPlayers = [0,1,2].map(i => new Player(0, 0, 'red', i));
-  game.ball = null;
-  game.selectedThrower = null;
-  game.warningTarget = null;
-  game.warningTimer = 0;
-  game.swipeDetected = false;
-  game.resultMsg = '';
+  const yFracs = [0.20, 0.50, 0.80];
+  const bx = crtX + crtW * 0.13;
+  const rx = crtX + crtW * 0.87;
+  game.players   = yFracs.map((f, i) => new Player(bx, crtY + crtH * f, 'blue', i));
+  game.aiPlayers = yFracs.map((f, i) => {
+    const p = new Player(rx, crtY + crtH * f, 'red', i);
+    p.tx = rx; p.ty = p.y;
+    p.mt = 200 + Math.random() * 800;
+    return p;
+  });
+  game.ball        = null;
+  game.effects     = [];
+  game.resultMsg   = '';
   game.resultTimer = 0;
-  game.turnCount = 0;
-  game.lastTurn = 'ai';
-  initPositions();
-  transitionTo('PLAYER_SELECT_THROWER');
+  game.winSide     = null;
+  game.lastThrower = null;
+  sl.on = false;
+  mv.on = false;
+  goto('PLAYER_ATTACK');
 }
 
-// ─── State Machine ────────────────────────────────────────────────────────────
-function transitionTo(phase) {
+function goto(phase) {
   game.phase = phase;
 
-  if (phase === 'PLAYER_SELECT_THROWER') {
+  if (phase === 'PLAYER_ATTACK') {
     game.ball = null;
-    game.selectedThrower = null;
-    game.players.forEach(p => p.selected = false);
-    // Auto-select if only one alive
-    const alive = game.players.filter(p => p.alive);
-    if (alive.length === 1) {
-      game.selectedThrower = alive[0];
-      alive[0].selected = true;
-      transitionTo('PLAYER_SELECT_TARGET');
-    }
+    sl.on = false;
+    mv.on = false;
+    game.aiPlayers.forEach(p => { p.winding = false; });
   }
 
-  if (phase === 'AI_WARNING') {
-    const alivePlayers = game.players.filter(p => p.alive);
-    // AI picks target
-    const target = Math.random() < 0.7
-      ? alivePlayers[0]
-      : alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
-    game.warningTarget = target;
-    game.warningTimer = CFG.WARNING_MS;
-    game.swipeDetected = false;
-    game.swipeDir = null;
+  if (phase === 'AI_WINDUP') {
+    game.ball = null;
+    sl.on = false;
+    mv.on = false;
+    const alive   = game.aiPlayers.filter(p => p.alive);
+    const targets = game.players.filter(p => p.alive);
+    game.aiThrower = alive[Math.floor(Math.random() * alive.length)];
+    game.aiTarget  = targets[Math.floor(Math.random() * targets.length)];
+    game.windupTimer = C.WINDUP_MS;
+    // Thrower charges toward center
+    game.aiThrower.winding = true;
+    game.aiThrower.tx = midX - PR * 3.5;
+    game.aiThrower.ty = game.aiTarget.y;
+    game.aiThrower.mt = 99999;
+    game.lastThrower = 'ai';
   }
 
   if (phase === 'GAME_OVER') {
     game.ball = null;
+    sl.on = false;
+    mv.on = false;
   }
 }
 
-// ─── AI Dodge Decision ────────────────────────────────────────────────────────
-function aiDodgeDecision(aiPlayer) {
-  const rate = Math.min(0.78, CFG.AI_DODGE_BASE + game.turnCount * 0.015);
-  if (Math.random() < rate) {
-    const dir = Math.random() < 0.5 ? -1 : 1;
-    aiPlayer.dodgeTargetY = aiPlayer.baseY + dir * DODGE_DISTANCE;
-    // clamp inside court
-    aiPlayer.dodgeTargetY = Math.max(courtY + PLAYER_RADIUS, Math.min(courtY + courtH - PLAYER_RADIUS, aiPlayer.dodgeTargetY));
-    aiPlayer.isDodging = true;
-    aiPlayer.dodgeTimer = CFG.DODGE_DURATION_MS;
-    aiPlayer.returning = false;
-  }
-}
+// ── AI Movement ───────────────────────────────────────────────────────────────
+function updateAI(dt) {
+  game.aiPlayers.forEach(p => {
+    if (!p.alive) return;
 
-// ─── Launch AI Ball ───────────────────────────────────────────────────────────
-function launchAiBall() {
-  const target = game.warningTarget;
-  const aliveAi = game.aiPlayers.filter(p => p.alive);
-  // pick thrower closest in Y to target
-  const thrower = aliveAi.reduce((best, p) =>
-    Math.abs(p.y - target.y) < Math.abs(best.y - target.y) ? p : best
-  );
-  game.ball = new Ball(thrower, target, CFG.DEFENSE_FLIGHT_MS);
-  game.lastTurn = 'ai';
-  game.turnCount++;
-}
+    // Move toward current target
+    const dx = p.tx - p.x, dy = p.ty - p.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 1.5) {
+      const speed = C.AI_MOVE_PX * (p.winding ? C.AI_FAST_MUL : 1.0) * dt / 1000;
+      const step  = Math.min(dist, speed);
+      p.x += (dx / dist) * step;
+      p.y += (dy / dist) * step;
+      p.clamp();
+    }
 
-// ─── Launch Player Ball ───────────────────────────────────────────────────────
-function launchPlayerBall(thrower, target) {
-  game.ball = new Ball(thrower, target, CFG.ATTACK_FLIGHT_MS);
-  // AI dodge fires immediately
-  aiDodgeDecision(target);
-  game.lastTurn = 'player';
-  game.turnCount++;
-  transitionTo('BALL_FLYING_ATTACK');
-}
+    // Tick move timer and pick new wander target
+    if (!p.winding) {
+      p.mt -= dt;
+      if (p.mt <= 0) pickAIWanderTarget(p);
+    }
 
-// ─── Bezier helpers ───────────────────────────────────────────────────────────
-function easeInOutQuad(t) {
-  return t < 0.5 ? 2*t*t : -1 + (4 - 2*t)*t;
-}
-function bezier(p0, p1, p2, t) {
-  return (1-t)*(1-t)*p0 + 2*(1-t)*t*p1 + t*t*p2;
-}
-
-// ─── Update ───────────────────────────────────────────────────────────────────
-let lastTime = 0;
-
-function update(dt) {
-  const p = game.phase;
-
-  // Decay hit flashes
-  [...game.players, ...game.aiPlayers].forEach(pl => {
-    if (pl.hitFlash > 0) pl.hitFlash -= dt;
+    // Thrower tracks the target's y during wind-up
+    if (p.winding && game.aiTarget && game.aiTarget.alive) {
+      p.ty = game.aiTarget.y;
+    }
   });
 
-  // Result timer ticks in CHECK_WIN
-  if (game.resultTimer > 0) game.resultTimer -= dt;
-
-  // Dodge animations for all players
-  [...game.players, ...game.aiPlayers].forEach(pl => updateDodge(pl, dt));
-
-  if (p === 'BALL_FLYING_ATTACK') {
-    advanceBall(dt);
-    if (game.ball.t >= 1.0) {
-      resolveAttack();
-    }
-
-  } else if (p === 'BALL_FLYING_DEFENSE') {
-    advanceBall(dt);
-    if (game.ball.t >= 1.0) {
-      resolveDefense();
-    }
-
-  } else if (p === 'AI_WARNING') {
-    game.warningTimer -= dt;
-    if (game.warningTimer <= 0) {
-      launchAiBall();
-      transitionTo('BALL_FLYING_DEFENSE');
-    }
-
-  } else if (p === 'CHECK_WIN') {
-    if (game.resultTimer <= 0) {
-      const aiAlive = game.aiPlayers.filter(x => x.alive).length;
-      const plAlive = game.players.filter(x => x.alive).length;
-      if (aiAlive === 0) {
-        transitionTo('GAME_OVER');
-        game.winSide = 'blue';
-      } else if (plAlive === 0) {
-        transitionTo('GAME_OVER');
-        game.winSide = 'red';
-      } else {
-        // alternate turns
-        if (game.lastTurn === 'player') {
-          transitionTo('AI_WARNING');
-        } else {
-          transitionTo('PLAYER_SELECT_THROWER');
-        }
-      }
-    }
+  // React to a ball flying toward the AI side
+  if (game.phase === 'BALL_FLYING_P' && game.ball) {
+    aiReactToBall(game.ball);
   }
 }
 
-function advanceBall(dt) {
+function pickAIWanderTarget(p) {
+  const z = p.zone();
+  // During player attack, AI spreads a bit wider; otherwise normal roam
+  p.tx = z.x0 + Math.random() * (z.x1 - z.x0);
+  p.ty = z.y0 + Math.random() * (z.y1 - z.y0);
+  p.clampTarget();
+  p.mt = 600 + Math.random() * 1000;
+}
+
+// Trajectory-prediction dodge for AI
+function aiReactToBall(ball) {
+  const spd2 = ball.vx * ball.vx + ball.vy * ball.vy;
+  if (spd2 < 1) return;
+
+  game.aiPlayers.forEach(p => {
+    if (!p.alive || p.mt > 400) return; // already committed to a move
+
+    // Vector from ball to player
+    const bpx = p.x - ball.x, bpy = p.y - ball.y;
+    const dot = ball.vx * bpx + ball.vy * bpy;
+    if (dot <= 0) return; // ball heading away
+
+    // Time to closest approach
+    const t = dot / spd2;
+    if (t > 1.4) return; // too far in future
+
+    const futX = ball.x + ball.vx * t;
+    const futY = ball.y + ball.vy * t;
+    const miss = Math.hypot(futX - p.x, futY - p.y);
+
+    if (miss < PR * 3.5) {
+      // Dodge perpendicular to ball direction
+      const spd  = Math.sqrt(spd2);
+      const perpX = -ball.vy / spd;
+      const perpY =  ball.vx / spd;
+      const dir   = (p.y < crtY + crtH * 0.5) ? 1 : -1;
+      p.tx = p.x + perpX * dir * PR * 3.8;
+      p.ty = p.y + perpY * dir * PR * 3.8;
+      p.clampTarget();
+      p.mt = 750; // hold the dodge for a bit
+    }
+  });
+}
+
+// ── Throws ────────────────────────────────────────────────────────────────────
+function playerThrow() {
+  const p = sl.player;
+  if (!p || !p.alive) { sl.on = false; return; }
+
+  const dist = Math.sqrt(sl.dx * sl.dx + sl.dy * sl.dy);
+  if (dist < C.SLING_MIN_PX) { sl.on = false; return; }
+
+  // Throw direction is OPPOSITE of pull
+  const ndx = -sl.dx / dist, ndy = -sl.dy / dist;
+  const t   = Math.min(1, dist / C.SLING_MAX_PX);
+  const spd = C.SPD_MIN + t * (C.SPD_MAX - C.SPD_MIN);
+
+  game.ball = new Ball(p.x, p.y, ndx * spd, ndy * spd, 'blue');
+  sl.on = false;
+  game.phase       = 'BALL_FLYING_P';
+  game.lastThrower = 'player';
+
+  // Delayed AI reaction (gives player a fair reaction window too)
+  setTimeout(() => {
+    if (game.ball && game.ball.from === 'blue') aiReactToBall(game.ball);
+  }, C.DODGE_REACT);
+}
+
+function aiThrow() {
+  const th = game.aiThrower, tg = game.aiTarget;
+  if (!th || !th.alive || !tg || !tg.alive) { goto('PLAYER_ATTACK'); return; }
+
+  const angle = Math.atan2(tg.y - th.y, tg.x - th.x)
+                + (Math.random() - 0.5) * C.AI_SPREAD * 2;
+  const spd   = C.AI_BASE_SPD + (Math.random() - 0.5) * C.AI_SPD_VAR;
+
+  game.ball = new Ball(th.x, th.y, Math.cos(angle) * spd, Math.sin(angle) * spd, 'red');
+  th.winding = false;
+  game.phase = 'BALL_FLYING_A';
+}
+
+// ── Ball Physics & Hit Detection ──────────────────────────────────────────────
+function updateBall(dt) {
   const b = game.ball;
-  b.t += dt / b.duration;
-  b.t = Math.min(b.t, 1.0);
-  const et = easeInOutQuad(b.t);
+  if (!b) return;
+
+  b.age += dt;
   b.trail.push({ x: b.x, y: b.y });
-  if (b.trail.length > 8) b.trail.shift();
-  b.x = bezier(b.startX, b.cpX, b.endX, et);
-  b.y = bezier(b.startY, b.cpY, b.endY, et);
-}
+  if (b.trail.length > 10) b.trail.shift();
 
-function updateDodge(pl, dt) {
-  if (pl.isDodging) {
-    const speed = dt / CFG.DODGE_DURATION_MS;
-    pl.x += (pl.dodgeTargetX - pl.x) * Math.min(1, speed * 6);
-    pl.y += (pl.dodgeTargetY - pl.y) * Math.min(1, speed * 6);
-    pl.dodgeTimer -= dt;
-    if (pl.dodgeTimer <= 0) {
-      pl.isDodging = false;
-      pl.returning = true;
-      pl.returnTimer = CFG.DODGE_RETURN_MS;
-    }
-  } else if (pl.returning) {
-    const speed = dt / CFG.DODGE_RETURN_MS;
-    pl.x += (pl.baseX - pl.x) * Math.min(1, speed * 4);
-    pl.y += (pl.baseY - pl.y) * Math.min(1, speed * 4);
-    pl.returnTimer -= dt;
-    if (pl.returnTimer <= 0) {
-      pl.x = pl.baseX;
-      pl.y = pl.baseY;
-      pl.returning = false;
+  b.x += b.vx * dt / 1000;
+  b.y += b.vy * dt / 1000;
+
+  // Out of bounds → miss
+  const mg = BR + 8;
+  if (b.x < crtX - mg || b.x > crtX + crtW + mg ||
+      b.y < crtY - mg || b.y > crtY + crtH + mg) {
+    onMiss(); return;
+  }
+
+  // Hit detection
+  const targets = b.from === 'blue' ? game.aiPlayers : game.players;
+  for (const p of targets) {
+    if (!p.alive) continue;
+    if (Math.hypot(b.x - p.x, b.y - p.y) < (BR + p.r) * 1.2) {
+      onHit(p); return;
     }
   }
 }
 
-function resolveAttack() {
-  const b = game.ball;
-  const target = b.targetPlayer;
-  const dx = b.x - target.x;
-  const dy = b.y - target.y;
-  const dist = Math.sqrt(dx*dx + dy*dy);
-  const hit = dist < HIT_TOLERANCE && target.alive;
-
-  if (hit) {
-    target.alive = false;
-    target.hitFlash = CFG.HIT_FLASH_MS;
-    game.resultMsg = 'HIT!';
-    game.resultColor = '#ff4444';
-  } else {
-    game.resultMsg = 'DODGED!';
-    game.resultColor = '#00ff88';
-  }
-  game.resultTimer = CFG.RESULT_DISPLAY_MS;
-  game.ball = null;
-  game.players.forEach(p => p.selected = false);
-  transitionTo('CHECK_WIN');
+function onHit(p) {
+  p.alive = false;
+  p.flash = C.FLASH_MS;
+  game.effects.push({
+    x: p.x, y: p.y, age: 0, dur: 650,
+    maxR: PR * 3,
+    color: p.team === 'blue' ? '#3a86ff' : '#ff4444',
+  });
+  game.ball        = null;
+  game.resultMsg   = 'HIT!';
+  game.resultColor = '#ff4444';
+  game.resultTimer = C.RESULT_MS;
 }
 
-function resolveDefense() {
-  const b = game.ball;
-  const target = b.targetPlayer;
-  const dx = b.x - target.x;
-  const dy = b.y - target.y;
-  const dist = Math.sqrt(dx*dx + dy*dy);
-  const hit = dist < HIT_TOLERANCE && target.alive;
-
-  if (hit) {
-    target.alive = false;
-    target.hitFlash = CFG.HIT_FLASH_MS;
-    game.resultMsg = 'HIT!';
-    game.resultColor = '#ff4444';
-  } else {
-    game.resultMsg = game.swipeDetected ? 'DODGED!' : 'MISS!';
-    game.resultColor = '#00ff88';
-  }
-  game.resultTimer = CFG.RESULT_DISPLAY_MS;
-  game.ball = null;
-  game.swipeDetected = false;
-  transitionTo('CHECK_WIN');
+function onMiss() {
+  game.ball        = null;
+  game.resultMsg   = 'MISS!';
+  game.resultColor = '#00ff88';
+  game.resultTimer = C.RESULT_MS;
 }
 
-// ─── Touch / Mouse Input ──────────────────────────────────────────────────────
-const pointer = { down: false, startX: 0, startY: 0, startTime: 0, x: 0, y: 0 };
+function checkWin() {
+  const ra = game.aiPlayers.filter(p => p.alive).length;
+  const pa = game.players.filter(p => p.alive).length;
+  if (ra === 0) { game.winSide = 'blue'; goto('GAME_OVER'); return; }
+  if (pa === 0) { game.winSide = 'red';  goto('GAME_OVER'); return; }
+  // Alternate: player just threw → AI's turn; AI just threw → player's turn
+  if (game.lastThrower === 'player') goto('AI_WINDUP');
+  else goto('PLAYER_ATTACK');
+}
 
-function getCoords(e) {
+// ── Update Loop ───────────────────────────────────────────────────────────────
+let lastTs = 0;
+
+function update(dt) {
+  // Flash decay
+  game.players.concat(game.aiPlayers).forEach(p => { if (p.flash > 0) p.flash -= dt; });
+
+  // Effects
+  game.effects = game.effects.filter(e => { e.age += dt; return e.age < e.dur; });
+
+  // Result display pause
+  if (game.resultTimer > 0) {
+    game.resultTimer -= dt;
+    if (game.resultTimer <= 0) checkWin();
+    // AI still wanders during result pause for visual life
+    if (game.phase !== 'MENU' && game.phase !== 'GAME_OVER') updateAI(dt);
+    return;
+  }
+
+  const ph = game.phase;
+  if (ph === 'MENU' || ph === 'GAME_OVER') return;
+
+  updateBall(dt);
+  updateAI(dt);
+
+  if (ph === 'AI_WINDUP') {
+    game.windupTimer -= dt;
+    if (game.windupTimer <= 0) aiThrow();
+  }
+}
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+const ptr = { dn: false };
+
+function coords(e) {
   const r = canvas.getBoundingClientRect();
-  if (e.touches && e.touches.length > 0) {
-    return { x: e.touches[0].clientX - r.left, y: e.touches[0].clientY - r.top };
-  }
-  if (e.changedTouches && e.changedTouches.length > 0) {
-    return { x: e.changedTouches[0].clientX - r.left, y: e.changedTouches[0].clientY - r.top };
-  }
-  return { x: e.clientX - r.left, y: e.clientY - r.top };
+  const s = e.touches ? e.touches[0] : (e.changedTouches ? e.changedTouches[0] : e);
+  return { x: s.clientX - r.left, y: s.clientY - r.top };
 }
 
-function hitPlayer(px, py, player) {
-  if (!player.alive) return false;
-  const dx = px - player.x, dy = py - player.y;
-  return Math.sqrt(dx*dx + dy*dy) < player.radius * 1.6;
+function nearPlayer(x, y, p) {
+  return p.alive && Math.hypot(x - p.x, y - p.y) < p.r * 1.9;
 }
 
-function onPointerDown(e) {
+function onDown(e) {
   e.preventDefault();
-  const { x, y } = getCoords(e);
-  pointer.down = true;
-  pointer.startX = pointer.x = x;
-  pointer.startY = pointer.y = y;
-  pointer.startTime = Date.now();
+  const { x, y } = coords(e);
+  ptr.dn = true;
 
   const ph = game.phase;
 
   if (ph === 'MENU' || ph === 'GAME_OVER') {
-    // check button tap
-    if (isButtonHit(x, y)) {
-      if (ph === 'MENU') {
-        initGame();
-      } else {
-        initGame();
-      }
-    }
+    if (inBtn(x, y)) initGame();
     return;
   }
 
-  if (ph === 'PLAYER_SELECT_THROWER') {
+  // Attack turn: start slingshot on any player touch
+  if (ph === 'PLAYER_ATTACK') {
     for (const p of game.players) {
-      if (hitPlayer(x, y, p)) {
-        game.players.forEach(q => q.selected = false);
-        p.selected = true;
-        game.selectedThrower = p;
-        transitionTo('PLAYER_SELECT_TARGET');
+      if (nearPlayer(x, y, p)) {
+        sl.on     = true;
+        sl.player = p;
+        sl.ox     = p.x;
+        sl.oy     = p.y;
+        sl.dx     = 0;
+        sl.dy     = 0;
         break;
       }
     }
     return;
   }
 
-  if (ph === 'PLAYER_SELECT_TARGET') {
-    // tap enemy → throw
-    for (const p of game.aiPlayers) {
-      if (hitPlayer(x, y, p)) {
-        launchPlayerBall(game.selectedThrower, p);
-        return;
-      }
-    }
-    // tap own player → change thrower
+  // Defense turns: drag player to reposition
+  if (ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A') {
     for (const p of game.players) {
-      if (hitPlayer(x, y, p)) {
-        game.players.forEach(q => q.selected = false);
-        p.selected = true;
-        game.selectedThrower = p;
-        return;
+      if (nearPlayer(x, y, p)) {
+        mv.on     = true;
+        mv.player = p;
+        mv.offX   = p.x - x;
+        mv.offY   = p.y - y;
+        break;
       }
     }
   }
 }
 
-function onPointerMove(e) {
+function onMove(e) {
   e.preventDefault();
-  const { x, y } = getCoords(e);
-  pointer.x = x;
-  pointer.y = y;
-}
+  const { x, y } = coords(e);
 
-function onPointerUp(e) {
-  e.preventDefault();
-  if (!pointer.down) return;
-  pointer.down = false;
+  if (sl.on) {
+    sl.dx = x - sl.ox;
+    sl.dy = y - sl.oy;
+  }
 
-  const { x, y } = getCoords(e);
-  const dx = x - pointer.startX;
-  const dy = y - pointer.startY;
-  const elapsed = Date.now() - pointer.startTime;
-
-  if (game.phase === 'BALL_FLYING_DEFENSE' || game.phase === 'AI_WARNING') {
-    // Swipe detection
-    if (Math.abs(dx) > CFG.SWIPE_THRESHOLD_PX && elapsed < CFG.SWIPE_TIME_WINDOW_MS) {
-      const dir = dx < 0 ? -1 : 1;
-      const target = game.warningTarget;
-      if (target && target.alive) {
-        game.swipeDetected = true;
-        game.swipeDir = dx < 0 ? 'left' : 'right';
-        // Apply dodge
-        target.dodgeTargetY = target.baseY + dir * DODGE_DISTANCE;
-        target.dodgeTargetY = Math.max(courtY + PLAYER_RADIUS, Math.min(courtY + courtH - PLAYER_RADIUS, target.dodgeTargetY));
-        target.dodgeTargetX = target.baseX;
-        target.isDodging = true;
-        target.dodgeTimer = CFG.DODGE_DURATION_MS;
-        target.returning = false;
-      }
-    }
+  if (mv.on && mv.player) {
+    mv.player.x = x + mv.offX;
+    mv.player.y = y + mv.offY;
+    mv.player.clamp();
   }
 }
 
-// button bounds (computed in render)
-let btnX, btnY, btnW, btnH;
-function isButtonHit(x, y) {
-  return x >= btnX && x <= btnX + btnW && y >= btnY && y <= btnY + btnH;
+function onUp(e) {
+  e.preventDefault();
+  if (!ptr.dn) return;
+  ptr.dn = false;
+
+  if (sl.on) playerThrow();
+
+  mv.on     = false;
+  mv.player = null;
 }
 
-canvas.addEventListener('touchstart', onPointerDown, { passive: false });
-canvas.addEventListener('touchmove', onPointerMove, { passive: false });
-canvas.addEventListener('touchend', onPointerUp, { passive: false });
-canvas.addEventListener('mousedown', onPointerDown);
-canvas.addEventListener('mousemove', onPointerMove);
-canvas.addEventListener('mouseup', onPointerUp);
+let btnX = 0, btnY = 0, btnW = 220, btnH = 55;
+function inBtn(x, y) { return x >= btnX && x <= btnX + btnW && y >= btnY && y <= btnY + btnH; }
 
-// ─── Rendering ────────────────────────────────────────────────────────────────
+canvas.addEventListener('touchstart', onDown, { passive: false });
+canvas.addEventListener('touchmove',  onMove, { passive: false });
+canvas.addEventListener('touchend',   onUp,   { passive: false });
+canvas.addEventListener('mousedown',  onDown);
+canvas.addEventListener('mousemove',  onMove);
+canvas.addEventListener('mouseup',    onUp);
+
+// ── Rendering ─────────────────────────────────────────────────────────────────
 function render() {
-  ctx.clearRect(0, 0, canvasW, canvasH);
-
-  // Background
-  ctx.fillStyle = '#1a1a2e';
-  ctx.fillRect(0, 0, canvasW, canvasH);
+  ctx.clearRect(0, 0, CW, CH);
+  ctx.fillStyle = '#0f0f1a';
+  ctx.fillRect(0, 0, CW, CH);
 
   drawCourt();
+  drawEffects();
 
-  // Ball trail + ball
-  if (game.ball) {
-    drawBallTrail(game.ball);
-    drawBall(game.ball);
+  if (game.ball) { drawTrail(game.ball); drawBallShape(game.ball); }
+
+  game.aiPlayers.concat(game.players).forEach(drawPlayer);
+
+  // Slingshot overlay (on top of players)
+  if (sl.on && sl.player) drawSlingshot();
+
+  const ph = game.phase;
+  if ((ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A') && game.aiTarget && game.aiTarget.alive) {
+    drawWarnRing(game.aiTarget);
+  }
+  if (ph === 'AI_WINDUP' && game.aiThrower && game.aiThrower.alive) {
+    drawWindupRing();
   }
 
-  // Players (dead ones faded)
-  [...game.aiPlayers, ...game.players].forEach(p => drawPlayer(p));
-
-  // Selection ring
-  if (game.phase === 'PLAYER_SELECT_THROWER' || game.phase === 'PLAYER_SELECT_TARGET') {
-    game.players.filter(p => p.selected && p.alive).forEach(p => drawSelectionRing(p));
-  }
-
-  // Trajectory arc
-  if (game.phase === 'PLAYER_SELECT_TARGET' && game.selectedThrower) {
-    // show arcs to all alive enemies (highlight on hover)
-    game.aiPlayers.filter(p => p.alive).forEach(p => {
-      const dx = pointer.x - p.x, dy = pointer.y - p.y;
-      const near = Math.sqrt(dx*dx + dy*dy) < p.radius * 2;
-      drawArc(game.selectedThrower, p, near ? 0.8 : 0.25);
-    });
-  }
-
-  // Warning ring
-  if ((game.phase === 'AI_WARNING' || game.phase === 'BALL_FLYING_DEFENSE') && game.warningTarget) {
-    drawWarningRing(game.warningTarget);
-  }
-
-  drawUI();
-
-  // Result flash
-  if (game.resultMsg && game.resultTimer > 0) {
-    drawResult();
-  }
-
-  // Overlays
-  if (game.phase === 'MENU') drawMenu();
-  if (game.phase === 'GAME_OVER') drawGameOver();
+  drawHUD();
+  if (game.resultMsg && game.resultTimer > 0) drawResult();
+  if (ph === 'MENU')      drawMenu();
+  if (ph === 'GAME_OVER') drawGameOver();
 }
 
+// ── Court ─────────────────────────────────────────────────────────────────────
 function drawCourt() {
-  // Court fill
-  ctx.fillStyle = '#2d6b26';
-  roundRect(courtX, courtY, courtW, courtH, 12);
+  ctx.fillStyle = '#1a4a24';
+  rr(crtX, crtY, crtW, crtH, 12);
   ctx.fill();
 
-  // Court border
-  ctx.strokeStyle = 'rgba(255,255,255,0.65)';
-  ctx.lineWidth = 3;
-  roundRect(courtX, courtY, courtW, courtH, 12);
-  ctx.stroke();
+  // Subtle horizontal texture lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.045)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 6; i++) {
+    const y = crtY + crtH * i / 6;
+    ctx.beginPath();
+    ctx.moveTo(crtX + 10, y);
+    ctx.lineTo(crtX + crtW - 10, y);
+    ctx.stroke();
+  }
 
-  // Center line (vertical)
-  const cx = courtX + courtW / 2;
+  // Center dashed line
+  ctx.save();
   ctx.setLineDash([10, 8]);
-  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.28)';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(cx, courtY + 10);
-  ctx.lineTo(cx, courtY + courtH - 10);
+  ctx.moveTo(midX, crtY + 10);
+  ctx.lineTo(midX, crtY + crtH - 10);
   ctx.stroke();
-  ctx.setLineDash([]);
+  ctx.restore();
 
-  // Center circle
-  ctx.beginPath();
-  ctx.arc(cx, courtY + courtH / 2, 28, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-  ctx.lineWidth = 2;
+  // Border
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+  ctx.lineWidth = 3;
+  rr(crtX, crtY, crtW, crtH, 12);
   ctx.stroke();
 
-  // Court labels
-  ctx.fillStyle = 'rgba(255,255,255,0.18)';
-  ctx.font = `bold ${Math.max(14, PLAYER_RADIUS * 0.8)}px Arial`;
-  ctx.textAlign = 'center';
+  // Zone labels
+  ctx.fillStyle = 'rgba(255,255,255,0.09)';
+  ctx.font      = `bold ${Math.max(11, PR * 0.68)}px Arial`;
+  ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('YOUR TEAM', courtX + courtW * 0.25, courtY + courtH * 0.5);
-  ctx.fillText('OPPONENTS', courtX + courtW * 0.75, courtY + courtH * 0.5);
+  ctx.fillText('YOUR SIDE',  crtX + crtW * 0.25, crtY + crtH * 0.5);
+  ctx.fillText('THEIR SIDE', crtX + crtW * 0.75, crtY + crtH * 0.5);
 }
 
-function roundRect(x, y, w, h, r) {
+function rr(x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
   ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.quadraticCurveTo(x + w, y,     x + w, y + r);
   ctx.lineTo(x + w, y + h - r);
   ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
   ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.quadraticCurveTo(x, y + h,     x, y + h - r);
   ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.quadraticCurveTo(x, y,         x + r, y);
   ctx.closePath();
 }
 
-function drawPlayer(player) {
-  const alpha = player.alive ? 1.0 : 0.0;
-  if (alpha === 0) return;
-
+// ── Player ────────────────────────────────────────────────────────────────────
+function drawPlayer(p) {
+  if (!p.alive) return;
   ctx.save();
-  ctx.globalAlpha = alpha;
 
-  // Shadow
-  ctx.shadowColor = 'rgba(0,0,0,0.5)';
-  ctx.shadowBlur = 10;
-
-  // Body
+  ctx.shadowColor = 'rgba(0,0,0,0.4)';
+  ctx.shadowBlur  = 8;
   ctx.beginPath();
-  ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
-
-  let color = player.team === 'blue' ? '#3a86ff' : '#ff4444';
-  if (player.hitFlash > 0) color = '#ffffff';
-  ctx.fillStyle = color;
+  ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+  ctx.fillStyle = p.flash > 0 ? '#ffffff' : (p.team === 'blue' ? '#3a86ff' : '#ff4444');
   ctx.fill();
-
   ctx.shadowBlur = 0;
 
   // Shine
-  const grad = ctx.createRadialGradient(
-    player.x - player.radius * 0.3, player.y - player.radius * 0.35, player.radius * 0.1,
-    player.x, player.y, player.radius
+  const g = ctx.createRadialGradient(
+    p.x - p.r * 0.3, p.y - p.r * 0.35, p.r * 0.1,
+    p.x, p.y, p.r
   );
-  grad.addColorStop(0, 'rgba(255,255,255,0.35)');
-  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.addColorStop(0, 'rgba(255,255,255,0.3)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.beginPath();
-  ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
-  ctx.fillStyle = grad;
+  ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+  ctx.fillStyle = g;
   ctx.fill();
 
-  // Jersey number
-  ctx.fillStyle = 'white';
-  ctx.font = `bold ${Math.round(player.radius * 0.78)}px Arial`;
-  ctx.textAlign = 'center';
+  // Number
+  ctx.fillStyle    = '#ffffff';
+  ctx.font         = `bold ${Math.round(p.r * 0.78)}px Arial`;
+  ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(player.index + 1, player.x, player.y + 1);
+  ctx.fillText(p.idx + 1, p.x, p.y + 1);
 
   ctx.restore();
 }
 
-function drawSelectionRing(player) {
-  const pulse = (Math.sin(Date.now() / 180) + 1) / 2;
-  ctx.beginPath();
-  ctx.arc(player.x, player.y, player.radius + 5 + pulse * 4, 0, Math.PI * 2);
-  ctx.strokeStyle = `rgba(255, 190, 11, ${0.7 + pulse * 0.3})`;
-  ctx.lineWidth = 3;
-  ctx.stroke();
-}
+// ── Slingshot ─────────────────────────────────────────────────────────────────
+function drawSlingshot() {
+  const p    = sl.player;
+  const dist = Math.sqrt(sl.dx * sl.dx + sl.dy * sl.dy);
+  const t    = Math.min(1, dist / C.SLING_MAX_PX);
+  const cx   = sl.ox + sl.dx;
+  const cy   = sl.oy + sl.dy;
 
-function drawWarningRing(player) {
-  const pulse = (Math.sin(Date.now() / 90) + 1) / 2;
-  const ringR = player.radius + 8 + pulse * 10;
-  ctx.beginPath();
-  ctx.arc(player.x, player.y, ringR, 0, Math.PI * 2);
-  ctx.strokeStyle = `rgba(255, 60, 60, ${0.6 + pulse * 0.4})`;
-  ctx.lineWidth = 4;
-  ctx.stroke();
-
-  // "DODGE!" label
-  ctx.fillStyle = `rgba(255,80,80,${0.8 + pulse * 0.2})`;
-  ctx.font = `bold ${Math.round(PLAYER_RADIUS * 0.75)}px Arial`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'bottom';
-  ctx.fillText('SWIPE!', player.x, player.y - player.radius - 8);
-}
-
-function drawBallTrail(ball) {
-  ball.trail.forEach((pos, i) => {
-    const alpha = (i / ball.trail.length) * 0.45;
-    const r = BALL_RADIUS * (0.4 + 0.6 * (i / ball.trail.length));
+  // Trajectory preview line
+  if (dist >= C.SLING_MIN_PX) {
+    const ndx = -sl.dx / dist;
+    const ndy = -sl.dy / dist;
+    ctx.save();
+    ctx.setLineDash([6, 9]);
+    ctx.strokeStyle = `rgba(255,255,80,${0.3 + t * 0.5})`;
+    ctx.lineWidth   = 2;
     ctx.beginPath();
-    ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(220,220,255,${alpha})`;
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(p.x + ndx * crtW * 0.9, p.y + ndy * crtW * 0.9);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Rubber band lines from player edges to finger
+  ctx.strokeStyle = `rgba(255,210,0,0.75)`;
+  ctx.lineWidth   = 3;
+  ctx.beginPath();
+  ctx.moveTo(p.x - p.r * 0.45, p.y);
+  ctx.lineTo(cx, cy);
+  ctx.moveTo(p.x + p.r * 0.45, p.y);
+  ctx.lineTo(cx, cy);
+  ctx.stroke();
+
+  // Ghost player at pull position
+  ctx.save();
+  ctx.globalAlpha = 0.38;
+  ctx.beginPath();
+  ctx.arc(cx, cy, p.r, 0, Math.PI * 2);
+  ctx.fillStyle = '#3a86ff';
+  ctx.fill();
+  ctx.restore();
+
+  // Power bar above player
+  if (dist >= C.SLING_MIN_PX) {
+    const bw = 58, bh = 8;
+    const bx = p.x - bw / 2;
+    const by = p.y - p.r - 22;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = t < 0.4 ? '#00ff88' : t < 0.72 ? '#ffcc00' : '#ff4444';
+    ctx.fillRect(bx, by, bw * t, bh);
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx, by, bw, bh);
+  }
+}
+
+// ── Warning & Windup ──────────────────────────────────────────────────────────
+function drawWarnRing(p) {
+  const pulse = (Math.sin(Date.now() / 80) + 1) / 2;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, p.r + 8 + pulse * 12, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(255,60,60,${0.55 + pulse * 0.45})`;
+  ctx.lineWidth   = 4;
+  ctx.stroke();
+  ctx.fillStyle    = `rgba(255,90,90,${0.82 + pulse * 0.18})`;
+  ctx.font         = `bold ${Math.round(PR * 0.68)}px Arial`;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('MOVE!', p.x, p.y - p.r - 5);
+}
+
+function drawWindupRing() {
+  const p    = game.aiThrower;
+  const frac = 1 - game.windupTimer / C.WINDUP_MS;
+
+  // Charging arc around thrower
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, p.r + 13, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+  ctx.strokeStyle = '#ffcc00';
+  ctx.lineWidth   = 5;
+  ctx.lineCap     = 'round';
+  ctx.stroke();
+
+  // Dashed aim line to target
+  if (game.aiTarget && game.aiTarget.alive) {
+    ctx.save();
+    ctx.setLineDash([5, 6]);
+    ctx.strokeStyle = 'rgba(255,100,100,0.32)';
+    ctx.lineWidth   = 2;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(game.aiTarget.x, game.aiTarget.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// ── Ball ──────────────────────────────────────────────────────────────────────
+function drawTrail(b) {
+  b.trail.forEach((pt, i) => {
+    const a = (i / b.trail.length) * 0.38;
+    const r = BR * (0.35 + 0.65 * (i / b.trail.length));
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(220,220,255,${a})`;
     ctx.fill();
   });
 }
 
-function drawBall(ball) {
-  ctx.shadowColor = 'rgba(255,255,255,0.6)';
-  ctx.shadowBlur = 12;
-
-  const grad = ctx.createRadialGradient(
-    ball.x - BALL_RADIUS * 0.3, ball.y - BALL_RADIUS * 0.35, 1,
-    ball.x, ball.y, BALL_RADIUS
+function drawBallShape(b) {
+  ctx.shadowColor = 'rgba(255,255,255,0.5)';
+  ctx.shadowBlur  = 10;
+  const g = ctx.createRadialGradient(
+    b.x - BR * 0.3, b.y - BR * 0.35, 1,
+    b.x, b.y, BR
   );
-  grad.addColorStop(0, '#ffffff');
-  grad.addColorStop(0.6, '#dddddd');
-  grad.addColorStop(1, '#aaaaaa');
-
+  g.addColorStop(0,   '#ffffff');
+  g.addColorStop(0.6, '#dddddd');
+  g.addColorStop(1,   '#aaaaaa');
   ctx.beginPath();
-  ctx.arc(ball.x, ball.y, BALL_RADIUS, 0, Math.PI * 2);
-  ctx.fillStyle = grad;
+  ctx.arc(b.x, b.y, BR, 0, Math.PI * 2);
+  ctx.fillStyle = g;
   ctx.fill();
   ctx.shadowBlur = 0;
 }
 
-function drawArc(from, to, opacity) {
-  const cpX = (from.x + to.x) / 2;
-  const cpY = (from.y + to.y) / 2 + CFG.ARC_HEIGHT;
-  const steps = 22;
-
-  ctx.save();
-  ctx.setLineDash([7, 6]);
-  ctx.strokeStyle = `rgba(255, 255, 255, ${opacity})`;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  for (let i = 0; i <= steps; i++) {
-    const t = i / steps;
-    const x = bezier(from.x, cpX, to.x, t);
-    const y = bezier(from.y, cpY, to.y, t);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-  ctx.restore();
+// ── Effects ───────────────────────────────────────────────────────────────────
+function drawEffects() {
+  game.effects.forEach(fx => {
+    const t = fx.age / fx.dur;
+    ctx.beginPath();
+    ctx.arc(fx.x, fx.y, fx.maxR * t, 0, Math.PI * 2);
+    ctx.strokeStyle  = fx.color;
+    ctx.globalAlpha  = 1 - t;
+    ctx.lineWidth    = 3;
+    ctx.stroke();
+    ctx.globalAlpha  = 1;
+  });
 }
 
-function drawUI() {
-  const fontSize = Math.max(13, Math.round(canvasH * 0.022));
-  const phaseSize = Math.max(14, Math.round(canvasH * 0.026));
+// ── HUD ───────────────────────────────────────────────────────────────────────
+function drawHUD() {
+  const fsz = Math.max(14, Math.round(CH * 0.026));
 
-  // Score bar background
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.fillRect(0, 0, canvasW, courtY - 2);
+  // Top score bar
+  ctx.fillStyle = 'rgba(0,0,0,0.42)';
+  ctx.fillRect(0, 0, CW, crtY - 2);
 
-  // Blue score (left)
-  const aliveBlue = game.players.filter(p => p.alive).length;
-  const aliveRed = game.aiPlayers.filter(p => p.alive).length;
+  const ab = game.players.filter(p => p.alive).length;
+  const ar = game.aiPlayers.filter(p => p.alive).length;
 
-  // Blue team icons
-  ctx.fillStyle = '#3a86ff';
-  ctx.font = `bold ${phaseSize}px Arial`;
-  ctx.textAlign = 'left';
+  ctx.font         = `bold ${fsz}px Arial`;
   ctx.textBaseline = 'middle';
-  ctx.fillText(`🔵 YOU: ${aliveBlue}/3`, 14, courtY / 2);
 
-  // Red team icons
+  ctx.fillStyle = '#3a86ff';
+  ctx.textAlign = 'left';
+  ctx.fillText(`YOU: ${ab}/3`, 14, crtY / 2);
+
   ctx.fillStyle = '#ff4444';
   ctx.textAlign = 'right';
-  ctx.fillText(`${aliveRed}/3 :THEM 🔴`, canvasW - 14, courtY / 2);
+  ctx.fillText(`THEM: ${ar}/3`, CW - 14, crtY / 2);
 
-  // Phase message
-  let phaseMsg = '';
-  let hint = '';
   const ph = game.phase;
-  if (ph === 'PLAYER_SELECT_THROWER') {
-    phaseMsg = 'YOUR TURN';
-    hint = 'Tap one of your players to select them';
-  } else if (ph === 'PLAYER_SELECT_TARGET') {
-    phaseMsg = 'SELECT TARGET';
-    hint = 'Tap an enemy to throw!';
-  } else if (ph === 'BALL_FLYING_ATTACK') {
-    phaseMsg = 'THROWING...';
-    hint = '';
-  } else if (ph === 'AI_WARNING') {
-    phaseMsg = '⚠ INCOMING!';
-    hint = 'Swipe the highlighted player to dodge!';
-  } else if (ph === 'BALL_FLYING_DEFENSE') {
-    phaseMsg = 'DODGE!';
-    hint = game.swipeDetected ? 'Dodging!' : 'Swipe now!';
-  } else if (ph === 'CHECK_WIN') {
-    phaseMsg = '';
-    hint = '';
-  }
+  const phLabel = {
+    PLAYER_ATTACK: 'YOUR TURN',
+    BALL_FLYING_P: 'IN FLIGHT',
+    AI_WINDUP:     '⚠ INCOMING!',
+    BALL_FLYING_A: 'DODGE!',
+  }[ph];
 
-  if (phaseMsg) {
-    ctx.fillStyle = 'rgba(255,255,255,0.9)';
-    ctx.font = `bold ${phaseSize}px Arial`;
+  if (phLabel) {
+    ctx.fillStyle = (ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A') ? '#ff8080' : '#ffffff';
+    ctx.font      = `bold ${fsz}px Arial`;
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(phaseMsg, canvasW / 2, courtY / 2);
+    ctx.fillText(phLabel, CW / 2, crtY / 2);
   }
 
   // Bottom hint bar
-  if (hint) {
-    const barY = courtY + courtH + 4;
-    const barH = canvasH - barY;
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.fillRect(0, barY, canvasW, barH);
-    ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.font = `${fontSize}px Arial`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(hint, canvasW / 2, barY + barH / 2);
-  }
+  const barY = crtY + crtH + 4;
+  const barH = CH - barY;
+  if (barH > 4) {
+    ctx.fillStyle = 'rgba(0,0,0,0.32)';
+    ctx.fillRect(0, barY, CW, barH);
 
-  // Countdown arc during AI_WARNING
-  if (ph === 'AI_WARNING') {
-    const barY = courtY + courtH + 4;
-    const barH = canvasH - barY;
-    const cx = canvasW / 2;
-    const cy = barY + barH / 2;
-    const fraction = game.warningTimer / CFG.WARNING_MS;
+    const hint = {
+      PLAYER_ATTACK: 'Pull back a player to aim & throw',
+      BALL_FLYING_P: '',
+      AI_WINDUP:     'Drag your players to dodge!',
+      BALL_FLYING_A: 'Drag to dodge!',
+    }[ph];
 
-    ctx.beginPath();
-    ctx.arc(cx - Math.min(barH, 30) * 3.5, cy, Math.min(barH * 0.4, 16), -Math.PI / 2, -Math.PI / 2 + fraction * Math.PI * 2);
-    ctx.strokeStyle = '#ff4444';
-    ctx.lineWidth = 5;
-    ctx.lineCap = 'round';
-    ctx.stroke();
+    if (hint) {
+      ctx.fillStyle    = 'rgba(255,255,255,0.65)';
+      ctx.font         = `${Math.max(11, Math.round(CH * 0.021))}px Arial`;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(hint, CW / 2, barY + barH / 2);
+    }
+
+    // Windup countdown bar
+    if (ph === 'AI_WINDUP') {
+      const frac = game.windupTimer / C.WINDUP_MS;
+      const bw2  = Math.min(CW * 0.32, 170);
+      const bh2  = Math.min(barH * 0.32, 9);
+      const bx2  = CW / 2 - bw2 / 2;
+      const by2  = barY + barH / 2 + 14;
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      ctx.fillRect(bx2, by2, bw2, bh2);
+      ctx.fillStyle = '#ff4444';
+      ctx.fillRect(bx2, by2, bw2 * frac, bh2);
+    }
   }
 }
 
 function drawResult() {
-  const alpha = Math.min(1, game.resultTimer / (CFG.RESULT_DISPLAY_MS * 0.3));
-  const size = Math.max(28, Math.round(canvasH * 0.06));
+  const a  = Math.min(1, game.resultTimer / (C.RESULT_MS * 0.45));
+  const sz = Math.max(28, Math.round(CH * 0.06));
   ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.font = `bold ${size}px Arial`;
-  ctx.textAlign = 'center';
+  ctx.globalAlpha  = a;
+  ctx.font         = `bold ${sz}px Arial`;
+  ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = game.resultColor;
-  ctx.shadowColor = 'rgba(0,0,0,0.8)';
-  ctx.shadowBlur = 8;
-  ctx.fillText(game.resultMsg, canvasW / 2, courtY + courtH / 2);
+  ctx.fillStyle    = game.resultColor;
+  ctx.shadowColor  = 'rgba(0,0,0,0.85)';
+  ctx.shadowBlur   = 10;
+  ctx.fillText(game.resultMsg, CW / 2, crtY + crtH / 2);
   ctx.restore();
 }
 
-function drawOverlay(title, titleColor, subtitle, btnLabel) {
-  // Dark overlay
-  ctx.fillStyle = 'rgba(10,10,30,0.82)';
-  ctx.fillRect(0, 0, canvasW, canvasH);
+// ── Overlays ──────────────────────────────────────────────────────────────────
+function drawOverlay(title, titleColor, sub, btnLabel) {
+  ctx.fillStyle = 'rgba(10,10,30,0.86)';
+  ctx.fillRect(0, 0, CW, CH);
 
-  const cxM = canvasW / 2;
-  const cyM = canvasH / 2;
-
-  // Title
-  const titleSize = Math.max(32, Math.round(canvasH * 0.075));
-  ctx.fillStyle = titleColor;
-  ctx.font = `bold ${titleSize}px Arial`;
-  ctx.textAlign = 'center';
+  const cx = CW / 2, cy = CH / 2;
+  const tsz = Math.max(32, Math.round(CH * 0.075));
+  ctx.fillStyle    = titleColor;
+  ctx.font         = `bold ${tsz}px Arial`;
+  ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  ctx.shadowColor = 'rgba(0,0,0,0.8)';
-  ctx.shadowBlur = 12;
-  ctx.fillText(title, cxM, cyM - canvasH * 0.15);
-  ctx.shadowBlur = 0;
+  ctx.shadowColor  = 'rgba(0,0,0,0.8)';
+  ctx.shadowBlur   = 12;
+  ctx.fillText(title, cx, cy - CH * 0.15);
+  ctx.shadowBlur   = 0;
 
-  // Subtitle
-  const subSize = Math.max(14, Math.round(canvasH * 0.028));
-  ctx.fillStyle = 'rgba(255,255,255,0.8)';
-  ctx.font = `${subSize}px Arial`;
-  ctx.fillText(subtitle, cxM, cyM - canvasH * 0.07);
+  ctx.fillStyle = 'rgba(255,255,255,0.72)';
+  ctx.font      = `${Math.max(13, Math.round(CH * 0.026))}px Arial`;
+  ctx.fillText(sub, cx, cy - CH * 0.06);
 
-  // Button
-  btnW = Math.min(220, canvasW * 0.5);
-  btnH = Math.max(46, canvasH * 0.07);
-  btnX = cxM - btnW / 2;
-  btnY = cyM + canvasH * 0.02;
+  btnW = Math.min(220, CW * 0.5);
+  btnH = Math.max(46, CH * 0.07);
+  btnX = cx - btnW / 2;
+  btnY = cy + CH * 0.02;
 
   ctx.fillStyle = '#3a86ff';
-  roundRect(btnX, btnY, btnW, btnH, 10);
+  rr(btnX, btnY, btnW, btnH, 10);
   ctx.fill();
-
-  const btnTextSize = Math.max(16, Math.round(canvasH * 0.032));
-  ctx.fillStyle = '#ffffff';
-  ctx.font = `bold ${btnTextSize}px Arial`;
-  ctx.textAlign = 'center';
+  ctx.fillStyle    = '#ffffff';
+  ctx.font         = `bold ${Math.max(16, Math.round(CH * 0.032))}px Arial`;
+  ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(btnLabel, cxM, btnY + btnH / 2);
+  ctx.fillText(btnLabel, cx, btnY + btnH / 2);
 }
 
 function drawMenu() {
   drawOverlay(
-    'DODGEBALL',
-    '#ffffff',
-    '3v3 • Tap enemies to throw • Swipe to dodge',
+    'DODGEBALL', '#ffffff',
+    'Pull back to throw  •  Drag to dodge',
     'START GAME'
   );
-
-  // Extra instructions
-  const infoSize = Math.max(12, Math.round(canvasH * 0.022));
-  ctx.fillStyle = 'rgba(255,255,255,0.5)';
-  ctx.font = `${infoSize}px Arial`;
-  ctx.textAlign = 'center';
+  ctx.fillStyle    = 'rgba(255,255,255,0.4)';
+  ctx.font         = `${Math.max(11, Math.round(CH * 0.019))}px Arial`;
+  ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('When warned, swipe your player left or right!', canvasW / 2, btnY + btnH + Math.max(24, canvasH * 0.05));
+  ctx.fillText(
+    'Opponents move dynamically — aim carefully!',
+    CW / 2, btnY + btnH + Math.max(20, CH * 0.042)
+  );
 }
 
 function drawGameOver() {
   const won = game.winSide === 'blue';
-  const aliveBlue = game.players.filter(p => p.alive).length;
-  const aliveRed = game.aiPlayers.filter(p => p.alive).length;
+  const ab  = game.players.filter(p => p.alive).length;
+  const ar  = game.aiPlayers.filter(p => p.alive).length;
   drawOverlay(
     won ? 'YOU WIN!' : 'YOU LOSE!',
     won ? '#00ff88' : '#ff4444',
-    `Blue: ${aliveBlue} left  •  Red: ${aliveRed} left`,
+    `Blue: ${ab} alive  •  Red: ${ar} alive`,
     'PLAY AGAIN'
   );
 }
 
-// ─── Game Loop ────────────────────────────────────────────────────────────────
-function gameLoop(timestamp) {
-  const dt = Math.min(timestamp - lastTime, 50);
-  lastTime = timestamp;
+// ── Game Loop ─────────────────────────────────────────────────────────────────
+function loop(ts) {
+  const dt = Math.min(ts - lastTs, 50);
+  lastTs = ts;
   update(dt);
   render();
-  requestAnimationFrame(gameLoop);
+  requestAnimationFrame(loop);
 }
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
 window.addEventListener('resize', resize);
 resize();
-
-// Set initial button bounds roughly so menu tap works before first render
-btnW = 220; btnH = 55;
-btnX = canvasW / 2 - 110;
-btnY = canvasH / 2 + canvasH * 0.02;
-
-requestAnimationFrame(ts => { lastTime = ts; gameLoop(ts); });
+btnX = CW / 2 - 110;
+btnY = CH / 2 + CH * 0.02;
+requestAnimationFrame(ts => { lastTs = ts; loop(ts); });
 </script>
 </body>
 </html>

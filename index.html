@@ -14,11 +14,18 @@
 </head>
 <body>
 <canvas id="gameCanvas"></canvas>
+<img id="menuGif"
+     src="https://media.giphy.com/media/3o7bug5J0ZJWBCXgEE/giphy.gif"
+     alt="funny dodgeball gif"
+     style="position:fixed;left:50%;transform:translateX(-50%);top:3%;
+            width:clamp(90px,20vmin,140px);border-radius:8px;
+            pointer-events:none;display:none;z-index:10;opacity:0.92;">
 <script>
 'use strict';
 
-const canvas = document.getElementById('gameCanvas');
-const ctx    = canvas.getContext('2d');
+const canvas   = document.getElementById('gameCanvas');
+const ctx      = canvas.getContext('2d');
+const menuGif  = document.getElementById('menuGif');
 
 // ── Layout globals ─────────────────────────────────────────────────────────────
 // All coordinates are in CSS pixels; ctx transform handles device pixel ratio.
@@ -658,6 +665,7 @@ function render() {
   if (game.resultMsg && game.resultTimer > 0) drawResult();
   if (ph === 'MENU')      drawMenu();
   if (ph === 'GAME_OVER') drawGameOver();
+  menuGif.style.display = ph === 'MENU' ? 'block' : 'none';
 }
 
 // ── Court ──────────────────────────────────────────────────────────────────────

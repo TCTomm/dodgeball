@@ -1150,7 +1150,7 @@ function drawMenu() {
 
   if (isPortrait) {
     // Stacked buttons for portrait (narrow screen)
-    const bw = Math.min(280, CW * 0.72);
+    const bw = Math.min(364, CW * 0.936);
     cpuBtn.w = bw; cpuBtn.h = bh;
     pvpBtn.w = bw; pvpBtn.h = bh;
     cpuBtn.x = pvpBtn.x = cx - bw / 2;
@@ -1158,7 +1158,7 @@ function drawMenu() {
     pvpBtn.y = cpuBtn.y + bh + Math.round(CH * 0.018);
   } else {
     // Side-by-side for landscape
-    const bw  = Math.min(200, CW * 0.38);
+    const bw  = Math.min(260, CW * 0.494);
     const gap = Math.min(18, CW * 0.04);
     cpuBtn.w = bw; cpuBtn.h = bh;
     pvpBtn.w = bw; pvpBtn.h = bh;

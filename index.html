@@ -20,25 +20,61 @@
 const canvas = document.getElementById('gameCanvas');
 const ctx    = canvas.getContext('2d');
 
-// Layout globals
-let CW, CH, crtX, crtY, crtW, crtH, midX, PR, BR;
+// ── Layout globals ─────────────────────────────────────────────────────────────
+// All coordinates are in CSS pixels; ctx transform handles device pixel ratio.
+let CW, CH;             // CSS viewport size
+let crtX, crtY, crtW, crtH;  // court rect
+let midX, midY;         // court centre (midX=left/right split, midY=top/bottom split)
+let PR, BR;             // player radius, ball radius
+let isPortrait = false; // true when height significantly exceeds width
+
+// Fullscreen button rect (always drawn in top-right of top bar)
+const fsBtn = { x: 0, y: 0, w: 0, h: 0 };
 
 function resize() {
-  CW = canvas.width  = window.innerWidth;
-  CH = canvas.height = window.innerHeight;
+  const DPR = window.devicePixelRatio || 1;
+  CW = window.innerWidth;
+  CH = window.innerHeight;
+  canvas.width  = Math.round(CW * DPR);
+  canvas.height = Math.round(CH * DPR);
+  canvas.style.width  = CW + 'px';
+  canvas.style.height = CH + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);  // all draw calls use CSS pixels
+
+  const wasPortrait = isPortrait;
+  isPortrait = CH > CW * 1.2;
+
   crtX = CW * 0.04;
-  crtY = CH * 0.115;
   crtW = CW * 0.92;
+  crtY = CH * 0.115;
   crtH = CH * 0.755;
   midX = crtX + crtW / 2;
-  PR = Math.max(16, Math.min(CW, CH) * 0.028);
+  midY = crtY + crtH / 2;
+
+  // Player radius: scale off the shorter side, capped so desktop doesn't get huge
+  PR = Math.max(18, Math.min(Math.min(CW, CH) * 0.058, 38));
   BR = PR * 0.48;
+
+  // Fullscreen button – right side of the top bar, vertically centred
+  fsBtn.h = Math.max(26, Math.round(crtY * 0.56));
+  fsBtn.w = fsBtn.h;
+  fsBtn.x = CW - fsBtn.w - 6;
+  fsBtn.y = Math.round((crtY - fsBtn.h) / 2);
+
+  // If orientation flipped mid-game, bail back to menu
+  if (wasPortrait !== isPortrait &&
+      game.phase !== 'MENU' && game.phase !== 'GAME_OVER') {
+    game.phase = 'MENU';
+    tMap.clear();
+    game.ball = null;
+  }
+
   if (game.phase !== 'MENU' && game.phase !== 'GAME_OVER') {
     game.players.concat(game.aiPlayers).forEach(p => p.clamp());
   }
 }
 
-// ── Config ────────────────────────────────────────────────────────────────────
+// ── Config ─────────────────────────────────────────────────────────────────────
 const C = {
   SLING_MIN_PX:  18,
   SLING_MAX_PX:  90,
@@ -55,7 +91,7 @@ const C = {
   DODGE_REACT:  160,
 };
 
-// ── Player ────────────────────────────────────────────────────────────────────
+// ── Player ─────────────────────────────────────────────────────────────────────
 class Player {
   constructor(x, y, team, idx) {
     this.x = x; this.y = y;
@@ -72,6 +108,13 @@ class Player {
 
   zone() {
     const p = PR + 4;
+    if (isPortrait) {
+      // Portrait: blue = bottom half, red = top half
+      return this.team === 'blue'
+        ? { x0: crtX + p, x1: crtX + crtW - p, y0: midY + p,    y1: crtY + crtH - p }
+        : { x0: crtX + p, x1: crtX + crtW - p, y0: crtY + p,    y1: midY - p };
+    }
+    // Landscape: blue = left half, red = right half
     return this.team === 'blue'
       ? { x0: crtX + p,    x1: midX - p,        y0: crtY + p, y1: crtY + crtH - p }
       : { x0: midX + p,    x1: crtX + crtW - p,  y0: crtY + p, y1: crtY + crtH - p };
@@ -90,7 +133,7 @@ class Player {
   }
 }
 
-// ── Ball ──────────────────────────────────────────────────────────────────────
+// ── Ball ───────────────────────────────────────────────────────────────────────
 class Ball {
   constructor(x, y, vx, vy, from) {
     this.x = x; this.y = y;
@@ -101,10 +144,10 @@ class Ball {
   }
 }
 
-// ── Game State ────────────────────────────────────────────────────────────────
+// ── Game State ─────────────────────────────────────────────────────────────────
 const game = {
   phase:       'MENU',
-  mode:        'cpu',   // 'cpu' | 'human'
+  mode:        'cpu',
   players:     [],
   aiPlayers:   [],
   ball:        null,
@@ -119,10 +162,8 @@ const game = {
   lastThrower: null,
 };
 
-// ── Multi-touch state ─────────────────────────────────────────────────────────
-// Each entry: { kind: 'p1sling'|'p2sling'|'p1drag'|'p2drag',
-//               player, ox?, oy?, dx?, dy?, offX?, offY? }
-const tMap = new Map();
+// ── Multi-touch state ──────────────────────────────────────────────────────────
+const tMap = new Map(); // touchId → { kind, player, ox?, oy?, dx?, dy?, offX?, offY? }
 
 function getP1Sling() {
   for (const e of tMap.values()) if (e.kind === 'p1sling') return e;
@@ -133,7 +174,7 @@ function getP2Sling() {
   return null;
 }
 
-// ── Menu button rects ─────────────────────────────────────────────────────────
+// ── Button rects ───────────────────────────────────────────────────────────────
 const cpuBtn  = { x: 0, y: 0, w: 0, h: 0 };
 const pvpBtn  = { x: 0, y: 0, w: 0, h: 0 };
 const playBtn = { x: 0, y: 0, w: 0, h: 0 };
@@ -142,19 +183,36 @@ function inBtn(x, y, btn) {
   return x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h;
 }
 
-// ── Init / State Transitions ──────────────────────────────────────────────────
+// ── Init / State Transitions ───────────────────────────────────────────────────
 function initGame(mode) {
   game.mode = mode;
-  const yFracs = [0.20, 0.50, 0.80];
-  const bx = crtX + crtW * 0.13;
-  const rx = crtX + crtW * 0.87;
-  game.players   = yFracs.map((f, i) => new Player(bx, crtY + crtH * f, 'blue', i));
-  game.aiPlayers = yFracs.map((f, i) => {
-    const p = new Player(rx, crtY + crtH * f, 'red', i);
-    p.tx = rx; p.ty = p.y;
-    p.mt = 200 + Math.random() * 800;
-    return p;
-  });
+
+  if (isPortrait) {
+    // Portrait: three players spread horizontally, blue at bottom, red at top
+    const xFracs = [0.20, 0.50, 0.80];
+    const by = crtY + crtH * 0.87;
+    const ry = crtY + crtH * 0.13;
+    game.players   = xFracs.map((f, i) => new Player(crtX + crtW * f, by, 'blue', i));
+    game.aiPlayers = xFracs.map((f, i) => {
+      const p = new Player(crtX + crtW * f, ry, 'red', i);
+      p.tx = p.x; p.ty = ry;
+      p.mt = 200 + Math.random() * 800;
+      return p;
+    });
+  } else {
+    // Landscape: three players spread vertically, blue at left, red at right
+    const yFracs = [0.20, 0.50, 0.80];
+    const bx = crtX + crtW * 0.13;
+    const rx = crtX + crtW * 0.87;
+    game.players   = yFracs.map((f, i) => new Player(bx, crtY + crtH * f, 'blue', i));
+    game.aiPlayers = yFracs.map((f, i) => {
+      const p = new Player(rx, crtY + crtH * f, 'red', i);
+      p.tx = rx; p.ty = p.y;
+      p.mt = 200 + Math.random() * 800;
+      return p;
+    });
+  }
+
   game.ball        = null;
   game.effects     = [];
   game.resultMsg   = '';
@@ -185,9 +243,16 @@ function goto(phase) {
     game.aiTarget  = targets[Math.floor(Math.random() * targets.length)];
     game.windupTimer = C.WINDUP_MS;
     game.aiThrower.winding = true;
-    game.aiThrower.tx = midX - PR * 3.5;
-    game.aiThrower.ty = game.aiTarget.y;
     game.aiThrower.mt = 99999;
+    // Portrait: move toward horizontal centre, track target's x
+    // Landscape: move toward vertical centre, track target's y
+    if (isPortrait) {
+      game.aiThrower.tx = game.aiTarget.x;
+      game.aiThrower.ty = midY - PR * 3.5;  // just inside top half
+    } else {
+      game.aiThrower.tx = midX - PR * 3.5;  // just inside right half
+      game.aiThrower.ty = game.aiTarget.y;
+    }
     game.lastThrower = 'ai';
   }
 
@@ -196,7 +261,7 @@ function goto(phase) {
   }
 }
 
-// ── AI Movement ───────────────────────────────────────────────────────────────
+// ── AI Movement ────────────────────────────────────────────────────────────────
 function updateAI(dt) {
   game.aiPlayers.forEach(p => {
     if (!p.alive) return;
@@ -216,8 +281,10 @@ function updateAI(dt) {
       if (p.mt <= 0) pickAIWanderTarget(p);
     }
 
+    // Thrower tracks the target's position along the centre line axis
     if (p.winding && game.aiTarget && game.aiTarget.alive) {
-      p.ty = game.aiTarget.y;
+      if (isPortrait) p.tx = game.aiTarget.x;
+      else            p.ty = game.aiTarget.y;
     }
   });
 
@@ -253,10 +320,13 @@ function aiReactToBall(ball) {
     const miss = Math.hypot(futX - p.x, futY - p.y);
 
     if (miss < PR * 2.2) {
-      const spd  = Math.sqrt(spd2);
+      const spd   = Math.sqrt(spd2);
       const perpX = -ball.vy / spd;
       const perpY =  ball.vx / spd;
-      const dir   = (p.y < crtY + crtH * 0.5) ? 1 : -1;
+      // In portrait, spread based on x position; in landscape on y position
+      const dir = isPortrait
+        ? (p.x < crtX + crtW * 0.5 ? 1 : -1)
+        : (p.y < crtY + crtH * 0.5 ? 1 : -1);
       p.tx = p.x + perpX * dir * PR * 3.2;
       p.ty = p.y + perpY * dir * PR * 3.2;
       p.clampTarget();
@@ -265,11 +335,10 @@ function aiReactToBall(ball) {
   });
 }
 
-// ── Throws ────────────────────────────────────────────────────────────────────
+// ── Throws ─────────────────────────────────────────────────────────────────────
 function playerThrow(entry) {
   const p = entry.player;
   if (!p || !p.alive) return;
-
   const dist = Math.hypot(entry.dx, entry.dy);
   if (dist < C.SLING_MIN_PX) return;
 
@@ -291,7 +360,6 @@ function playerThrow(entry) {
 function p2Throw(entry) {
   const p = entry.player;
   if (!p || !p.alive) return;
-
   const dist = Math.hypot(entry.dx, entry.dy);
   if (dist < C.SLING_MIN_PX) return;
 
@@ -318,7 +386,7 @@ function aiThrow() {
   game.phase = 'BALL_FLYING_A';
 }
 
-// ── Ball Physics & Hit Detection ──────────────────────────────────────────────
+// ── Ball Physics & Hit Detection ───────────────────────────────────────────────
 function updateBall(dt) {
   const b = game.ball;
   if (!b) return;
@@ -348,11 +416,8 @@ function updateBall(dt) {
 function onHit(p) {
   p.alive = false;
   p.flash = C.FLASH_MS;
-  game.effects.push({
-    x: p.x, y: p.y, age: 0, dur: 650,
-    maxR: PR * 3,
-    color: p.team === 'blue' ? '#3a86ff' : '#ff4444',
-  });
+  game.effects.push({ x: p.x, y: p.y, age: 0, dur: 650, maxR: PR * 3,
+    color: p.team === 'blue' ? '#3a86ff' : '#ff4444' });
   game.ball        = null;
   game.resultMsg   = 'HIT!';
   game.resultColor = '#ff4444';
@@ -381,7 +446,7 @@ function checkWin() {
   }
 }
 
-// ── Update Loop ───────────────────────────────────────────────────────────────
+// ── Update Loop ────────────────────────────────────────────────────────────────
 let lastTs = 0;
 
 function update(dt) {
@@ -409,15 +474,32 @@ function update(dt) {
   }
 }
 
-// ── Input ─────────────────────────────────────────────────────────────────────
+// ── Fullscreen ─────────────────────────────────────────────────────────────────
+function toggleFullscreen() {
+  const doc = document, el = document.documentElement;
+  const isFs = !!(doc.fullscreenElement || doc.webkitFullscreenElement);
+  if (!isFs) {
+    if      (el.requestFullscreen)       el.requestFullscreen();
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  } else {
+    if      (doc.exitFullscreen)         doc.exitFullscreen();
+    else if (doc.webkitExitFullscreen)   doc.webkitExitFullscreen();
+  }
+}
+
+// ── Input ──────────────────────────────────────────────────────────────────────
 function nearPlayer(x, y, p) {
   return p.alive && Math.hypot(x - p.x, y - p.y) < p.r * 1.9;
+}
+
+function tryFsBtn(x, y) {
+  if (inBtn(x, y, fsBtn)) { toggleFullscreen(); return true; }
+  return false;
 }
 
 function startTouch(id, x, y) {
   const ph = game.phase;
 
-  // P1 slingshot: attack turn, touch a blue player
   if (ph === 'PLAYER_ATTACK' && !getP1Sling()) {
     for (const p of game.players) {
       if (nearPlayer(x, y, p)) {
@@ -427,7 +509,6 @@ function startTouch(id, x, y) {
     }
   }
 
-  // P2 slingshot (human mode): P2 attack turn, touch a red player
   if (ph === 'P2_ATTACK' && !getP2Sling()) {
     for (const p of game.aiPlayers) {
       if (nearPlayer(x, y, p)) {
@@ -437,7 +518,6 @@ function startTouch(id, x, y) {
     }
   }
 
-  // P1 dodge: drag blue players during P2's attack/flight
   if (ph === 'P2_ATTACK' || ph === 'BALL_FLYING_2') {
     for (const p of game.players) {
       if (nearPlayer(x, y, p)) {
@@ -447,7 +527,6 @@ function startTouch(id, x, y) {
     }
   }
 
-  // P2 dodge (human mode): drag red players during P1's attack/flight
   if (game.mode === 'human' && (ph === 'PLAYER_ATTACK' || ph === 'BALL_FLYING_P')) {
     for (const p of game.aiPlayers) {
       if (nearPlayer(x, y, p)) {
@@ -457,7 +536,6 @@ function startTouch(id, x, y) {
     }
   }
 
-  // P1 dodge (cpu mode): drag blue players while AI is attacking
   if (game.mode === 'cpu' && (ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A')) {
     for (const p of game.players) {
       if (nearPlayer(x, y, p)) {
@@ -492,7 +570,7 @@ function endTouch(id) {
 
 function handleOverlayTouch(x, y) {
   if (game.phase === 'MENU') {
-    if (inBtn(x, y, cpuBtn))  initGame('cpu');
+    if (inBtn(x, y, cpuBtn))       initGame('cpu');
     else if (inBtn(x, y, pvpBtn)) initGame('human');
   } else if (game.phase === 'GAME_OVER') {
     if (inBtn(x, y, playBtn)) initGame(game.mode);
@@ -506,6 +584,7 @@ canvas.addEventListener('touchstart', e => {
   const r = canvas.getBoundingClientRect();
   for (const t of e.changedTouches) {
     const x = t.clientX - r.left, y = t.clientY - r.top;
+    if (tryFsBtn(x, y)) continue;
     if (game.phase === 'MENU' || game.phase === 'GAME_OVER') handleOverlayTouch(x, y);
     else startTouch(t.identifier, x, y);
   }
@@ -524,9 +603,14 @@ canvas.addEventListener('touchend', e => {
   for (const t of e.changedTouches) endTouch(t.identifier);
 }, { passive: false });
 
+canvas.addEventListener('touchcancel', e => {
+  for (const t of e.changedTouches) tMap.delete(t.identifier);
+}, { passive: false });
+
 canvas.addEventListener('mousedown', e => {
   const r = canvas.getBoundingClientRect();
   const x = e.clientX - r.left, y = e.clientY - r.top;
+  if (tryFsBtn(x, y)) return;
   if (game.phase === 'MENU' || game.phase === 'GAME_OVER') handleOverlayTouch(x, y);
   else startTouch(MOUSE_ID, x, y);
 });
@@ -537,7 +621,7 @@ canvas.addEventListener('mousemove', e => {
 });
 canvas.addEventListener('mouseup', () => endTouch(MOUSE_ID));
 
-// ── Rendering ─────────────────────────────────────────────────────────────────
+// ── Rendering ──────────────────────────────────────────────────────────────────
 function render() {
   ctx.clearRect(0, 0, CW, CH);
   ctx.fillStyle = '#0f0f1a';
@@ -550,15 +634,12 @@ function render() {
 
   game.aiPlayers.concat(game.players).forEach(drawPlayer);
 
-  // Slingshot overlays
   const p1sl = getP1Sling();
   const p2sl = getP2Sling();
   if (p1sl) drawSlingshot(p1sl, '#3a86ff');
   if (p2sl) drawSlingshot(p2sl, '#ff4444');
 
   const ph = game.phase;
-
-  // CPU mode warning / windup rings
   if (game.mode === 'cpu') {
     if ((ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A') && game.aiTarget && game.aiTarget.alive) {
       drawWarnRing(game.aiTarget);
@@ -569,17 +650,19 @@ function render() {
   }
 
   drawHUD();
+  drawFsBtn();
   if (game.resultMsg && game.resultTimer > 0) drawResult();
   if (ph === 'MENU')      drawMenu();
   if (ph === 'GAME_OVER') drawGameOver();
 }
 
-// ── Court ─────────────────────────────────────────────────────────────────────
+// ── Court ──────────────────────────────────────────────────────────────────────
 function drawCourt() {
   ctx.fillStyle = '#1a4a24';
   rr(crtX, crtY, crtW, crtH, 12);
   ctx.fill();
 
+  // Subtle texture lines (always horizontal – look like field stripes)
   ctx.strokeStyle = 'rgba(255,255,255,0.045)';
   ctx.lineWidth = 1;
   for (let i = 1; i < 6; i++) {
@@ -590,31 +673,43 @@ function drawCourt() {
     ctx.stroke();
   }
 
+  // Centre dividing line (vertical in landscape, horizontal in portrait)
   ctx.save();
   ctx.setLineDash([10, 8]);
   ctx.strokeStyle = 'rgba(255,255,255,0.28)';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(midX, crtY + 10);
-  ctx.lineTo(midX, crtY + crtH - 10);
+  if (isPortrait) {
+    ctx.moveTo(crtX + 10, midY);
+    ctx.lineTo(crtX + crtW - 10, midY);
+  } else {
+    ctx.moveTo(midX, crtY + 10);
+    ctx.lineTo(midX, crtY + crtH - 10);
+  }
   ctx.stroke();
   ctx.restore();
 
+  // Border
   ctx.strokeStyle = 'rgba(255,255,255,0.55)';
   ctx.lineWidth = 3;
   rr(crtX, crtY, crtW, crtH, 12);
   ctx.stroke();
 
+  // Zone labels
   ctx.fillStyle = 'rgba(255,255,255,0.09)';
   ctx.font      = `bold ${Math.max(11, PR * 0.68)}px Arial`;
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  if (game.mode === 'human') {
-    ctx.fillText('P1 SIDE', crtX + crtW * 0.25, crtY + crtH * 0.5);
-    ctx.fillText('P2 SIDE', crtX + crtW * 0.75, crtY + crtH * 0.5);
+  if (isPortrait) {
+    const topLabel = game.mode === 'human' ? 'P2 SIDE' : 'THEIR SIDE';
+    const botLabel = game.mode === 'human' ? 'P1 SIDE' : 'YOUR SIDE';
+    ctx.fillText(topLabel, midX, crtY + crtH * 0.25);
+    ctx.fillText(botLabel, midX, crtY + crtH * 0.75);
   } else {
-    ctx.fillText('YOUR SIDE',  crtX + crtW * 0.25, crtY + crtH * 0.5);
-    ctx.fillText('THEIR SIDE', crtX + crtW * 0.75, crtY + crtH * 0.5);
+    const lLabel = game.mode === 'human' ? 'P1 SIDE' : 'YOUR SIDE';
+    const rLabel = game.mode === 'human' ? 'P2 SIDE' : 'THEIR SIDE';
+    ctx.fillText(lLabel, crtX + crtW * 0.25, crtY + crtH * 0.5);
+    ctx.fillText(rLabel, crtX + crtW * 0.75, crtY + crtH * 0.5);
   }
 }
 
@@ -632,7 +727,7 @@ function rr(x, y, w, h, r) {
   ctx.closePath();
 }
 
-// ── Player ────────────────────────────────────────────────────────────────────
+// ── Player ─────────────────────────────────────────────────────────────────────
 function drawPlayer(p) {
   if (!p.alive) return;
   ctx.save();
@@ -661,28 +756,28 @@ function drawPlayer(p) {
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(p.idx + 1, p.x, p.y + 1);
-
   ctx.restore();
 }
 
-// ── Slingshot ─────────────────────────────────────────────────────────────────
+// ── Slingshot ──────────────────────────────────────────────────────────────────
 function drawSlingshot(entry, ghostColor) {
   const p    = entry.player;
   const dist = Math.hypot(entry.dx, entry.dy);
   const t    = Math.min(1, dist / C.SLING_MAX_PX);
   const cx   = entry.ox + entry.dx;
   const cy   = entry.oy + entry.dy;
+  // Trajectory extends the length of the longer court dimension
+  const trajLen = Math.max(crtW, crtH) * 0.9;
 
   if (dist >= C.SLING_MIN_PX) {
-    const ndx = -entry.dx / dist;
-    const ndy = -entry.dy / dist;
+    const ndx = -entry.dx / dist, ndy = -entry.dy / dist;
     ctx.save();
     ctx.setLineDash([6, 9]);
     ctx.strokeStyle = `rgba(255,255,80,${0.3 + t * 0.5})`;
     ctx.lineWidth   = 2;
     ctx.beginPath();
     ctx.moveTo(p.x, p.y);
-    ctx.lineTo(p.x + ndx * crtW * 0.9, p.y + ndy * crtW * 0.9);
+    ctx.lineTo(p.x + ndx * trajLen, p.y + ndy * trajLen);
     ctx.stroke();
     ctx.restore();
   }
@@ -718,7 +813,7 @@ function drawSlingshot(entry, ghostColor) {
   }
 }
 
-// ── Warning & Windup ──────────────────────────────────────────────────────────
+// ── Warning & Windup ───────────────────────────────────────────────────────────
 function drawWarnRing(p) {
   const pulse = (Math.sin(Date.now() / 80) + 1) / 2;
   ctx.beginPath();
@@ -757,7 +852,7 @@ function drawWindupRing() {
   }
 }
 
-// ── Ball ──────────────────────────────────────────────────────────────────────
+// ── Ball ───────────────────────────────────────────────────────────────────────
 function drawTrail(b) {
   b.trail.forEach((pt, i) => {
     const a = (i / b.trail.length) * 0.38;
@@ -772,10 +867,7 @@ function drawTrail(b) {
 function drawBallShape(b) {
   ctx.shadowColor = 'rgba(255,255,255,0.5)';
   ctx.shadowBlur  = 10;
-  const g = ctx.createRadialGradient(
-    b.x - BR * 0.3, b.y - BR * 0.35, 1,
-    b.x, b.y, BR
-  );
+  const g = ctx.createRadialGradient(b.x - BR * 0.3, b.y - BR * 0.35, 1, b.x, b.y, BR);
   g.addColorStop(0,   '#ffffff');
   g.addColorStop(0.6, '#dddddd');
   g.addColorStop(1,   '#aaaaaa');
@@ -786,104 +878,167 @@ function drawBallShape(b) {
   ctx.shadowBlur = 0;
 }
 
-// ── Effects ───────────────────────────────────────────────────────────────────
+// ── Effects ────────────────────────────────────────────────────────────────────
 function drawEffects() {
   game.effects.forEach(fx => {
     const t = fx.age / fx.dur;
     ctx.beginPath();
     ctx.arc(fx.x, fx.y, fx.maxR * t, 0, Math.PI * 2);
-    ctx.strokeStyle  = fx.color;
-    ctx.globalAlpha  = 1 - t;
-    ctx.lineWidth    = 3;
+    ctx.strokeStyle = fx.color;
+    ctx.globalAlpha = 1 - t;
+    ctx.lineWidth   = 3;
     ctx.stroke();
-    ctx.globalAlpha  = 1;
+    ctx.globalAlpha = 1;
   });
 }
 
-// ── HUD ───────────────────────────────────────────────────────────────────────
+// ── HUD ────────────────────────────────────────────────────────────────────────
 function drawHUD() {
-  const fsz = Math.max(14, Math.round(CH * 0.026));
+  const fsz = Math.max(13, Math.round(CH * 0.026));
+  const ph  = game.phase;
+  const ab  = game.players.filter(p => p.alive).length;
+  const ar  = game.aiPlayers.filter(p => p.alive).length;
 
-  ctx.fillStyle = 'rgba(0,0,0,0.42)';
-  ctx.fillRect(0, 0, CW, crtY - 2);
+  const p1Label = game.mode === 'human' ? 'P1' : 'YOU';
+  const p2Label = game.mode === 'human' ? 'P2' : 'THEM';
 
-  const ab = game.players.filter(p => p.alive).length;
-  const ar = game.aiPlayers.filter(p => p.alive).length;
-
-  ctx.font         = `bold ${fsz}px Arial`;
-  ctx.textBaseline = 'middle';
-
-  if (game.mode === 'human') {
-    ctx.fillStyle = '#3a86ff';
-    ctx.textAlign = 'left';
-    ctx.fillText(`P1: ${ab}/3`, 14, crtY / 2);
-    ctx.fillStyle = '#ff4444';
-    ctx.textAlign = 'right';
-    ctx.fillText(`P2: ${ar}/3`, CW - 14, crtY / 2);
-  } else {
-    ctx.fillStyle = '#3a86ff';
-    ctx.textAlign = 'left';
-    ctx.fillText(`YOU: ${ab}/3`, 14, crtY / 2);
-    ctx.fillStyle = '#ff4444';
-    ctx.textAlign = 'right';
-    ctx.fillText(`THEM: ${ar}/3`, CW - 14, crtY / 2);
-  }
-
-  const ph = game.phase;
   const phLabel = game.mode === 'human'
     ? { PLAYER_ATTACK: 'P1 ATTACK', BALL_FLYING_P: 'IN FLIGHT',
         P2_ATTACK: 'P2 ATTACK',     BALL_FLYING_2: 'IN FLIGHT' }[ph]
     : { PLAYER_ATTACK: 'YOUR TURN', BALL_FLYING_P: 'IN FLIGHT',
         AI_WINDUP: '⚠ INCOMING!',   BALL_FLYING_A: 'DODGE!' }[ph];
 
-  if (phLabel) {
-    let color = '#ffffff';
-    if (game.mode === 'human') {
-      if (ph === 'PLAYER_ATTACK') color = '#5599ff';
-      else if (ph === 'P2_ATTACK') color = '#ff7070';
-    } else {
-      if (ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A') color = '#ff8080';
-    }
-    ctx.fillStyle = color;
-    ctx.font      = `bold ${fsz}px Arial`;
-    ctx.textAlign = 'center';
-    ctx.fillText(phLabel, CW / 2, crtY / 2);
+  let phColor = '#ffffff';
+  if (game.mode === 'human') {
+    if (ph === 'PLAYER_ATTACK') phColor = '#5599ff';
+    else if (ph === 'P2_ATTACK') phColor = '#ff7070';
+  } else {
+    if (ph === 'AI_WINDUP' || ph === 'BALL_FLYING_A') phColor = '#ff8080';
   }
 
-  const barY = crtY + crtH + 4;
-  const barH = CH - barY;
-  if (barH > 4) {
-    ctx.fillStyle = 'rgba(0,0,0,0.32)';
-    ctx.fillRect(0, barY, CW, barH);
+  // Reserve space to the right of phase label for FS button
+  const fsSafeRight = fsBtn.x - 4;
 
-    const hint = game.mode === 'human'
-      ? { PLAYER_ATTACK: 'P1: pull back to throw  •  P2: drag to dodge',
-          BALL_FLYING_P: 'P2: drag your players to dodge!',
-          P2_ATTACK:     'P2: pull back to throw  •  P1: drag to dodge',
-          BALL_FLYING_2: 'P1: drag your players to dodge!' }[ph]
-      : { PLAYER_ATTACK: 'Pull back a player to aim & throw',
-          BALL_FLYING_P: '',
-          AI_WINDUP:     'Drag your players to dodge!',
-          BALL_FLYING_A: 'Drag to dodge!' }[ph];
+  if (isPortrait) {
+    // ── Portrait: top bar = opponent (red/P2), bottom bar = player (blue/P1) ──
+    ctx.fillStyle = 'rgba(0,0,0,0.42)';
+    ctx.fillRect(0, 0, CW, crtY - 2);
 
-    if (hint) {
-      ctx.fillStyle    = 'rgba(255,255,255,0.65)';
-      ctx.font         = `${Math.max(11, Math.round(CH * 0.021))}px Arial`;
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(hint, CW / 2, barY + barH / 2);
+    ctx.font         = `bold ${fsz}px Arial`;
+    ctx.textBaseline = 'middle';
+
+    // Opponent score – top-left
+    ctx.fillStyle = '#ff4444';
+    ctx.textAlign = 'left';
+    ctx.fillText(`${p2Label}: ${ar}/3`, 14, crtY / 2);
+
+    // Phase label – top centre (don't exceed FS button)
+    if (phLabel) {
+      ctx.fillStyle = phColor;
+      ctx.textAlign = 'center';
+      ctx.fillText(phLabel, (14 + fsSafeRight) / 2, crtY / 2);
     }
 
-    if (game.mode === 'cpu' && ph === 'AI_WINDUP') {
-      const frac = game.windupTimer / C.WINDUP_MS;
-      const bw2  = Math.min(CW * 0.32, 170);
-      const bh2  = Math.min(barH * 0.32, 9);
-      const bx2  = CW / 2 - bw2 / 2;
-      const by2  = barY + barH / 2 + 14;
-      ctx.fillStyle = 'rgba(255,255,255,0.12)';
-      ctx.fillRect(bx2, by2, bw2, bh2);
-      ctx.fillStyle = '#ff4444';
-      ctx.fillRect(bx2, by2, bw2 * frac, bh2);
+    // Bottom bar: player score + hints
+    const barY = crtY + crtH + 4;
+    const barH = CH - barY;
+    if (barH > 4) {
+      ctx.fillStyle = 'rgba(0,0,0,0.42)';
+      ctx.fillRect(0, barY, CW, barH);
+
+      ctx.fillStyle    = '#3a86ff';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`${p1Label}: ${ab}/3`, 14, barY + barH * 0.32);
+
+      const hint = game.mode === 'human'
+        ? { PLAYER_ATTACK: 'P1: pull back  •  P2: drag to dodge',
+            BALL_FLYING_P: 'P2: drag to dodge!',
+            P2_ATTACK:     'P2: pull back  •  P1: drag to dodge',
+            BALL_FLYING_2: 'P1: drag to dodge!' }[ph]
+        : { PLAYER_ATTACK: 'Pull back to throw',
+            BALL_FLYING_P: '',
+            AI_WINDUP:     'Drag to dodge!',
+            BALL_FLYING_A: 'Drag to dodge!' }[ph];
+
+      if (hint) {
+        ctx.fillStyle    = 'rgba(255,255,255,0.60)';
+        ctx.font         = `${Math.max(10, Math.round(CH * 0.018))}px Arial`;
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(hint, 14, barY + barH * 0.70);
+      }
+
+      if (game.mode === 'cpu' && ph === 'AI_WINDUP') {
+        const frac = game.windupTimer / C.WINDUP_MS;
+        const bw2  = Math.min(CW * 0.40, 200);
+        const bh2  = Math.min(barH * 0.20, 7);
+        const bx2  = 14;
+        const by2  = barY + barH - bh2 - 6;
+        ctx.fillStyle = 'rgba(255,255,255,0.12)';
+        ctx.fillRect(bx2, by2, bw2, bh2);
+        ctx.fillStyle = '#ff4444';
+        ctx.fillRect(bx2, by2, bw2 * frac, bh2);
+      }
+    }
+
+  } else {
+    // ── Landscape: single top bar with both scores ──
+    ctx.fillStyle = 'rgba(0,0,0,0.42)';
+    ctx.fillRect(0, 0, CW, crtY - 2);
+
+    ctx.font         = `bold ${fsz}px Arial`;
+    ctx.textBaseline = 'middle';
+
+    ctx.fillStyle = '#3a86ff';
+    ctx.textAlign = 'left';
+    ctx.fillText(`${p1Label}: ${ab}/3`, 14, crtY / 2);
+
+    ctx.fillStyle = '#ff4444';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${p2Label}: ${ar}/3`, fsSafeRight, crtY / 2);
+
+    if (phLabel) {
+      ctx.fillStyle = phColor;
+      ctx.textAlign = 'center';
+      ctx.fillText(phLabel, CW / 2, crtY / 2);
+    }
+
+    const barY = crtY + crtH + 4;
+    const barH = CH - barY;
+    if (barH > 4) {
+      ctx.fillStyle = 'rgba(0,0,0,0.32)';
+      ctx.fillRect(0, barY, CW, barH);
+
+      const hint = game.mode === 'human'
+        ? { PLAYER_ATTACK: 'P1: pull back to throw  •  P2: drag to dodge',
+            BALL_FLYING_P: 'P2: drag your players to dodge!',
+            P2_ATTACK:     'P2: pull back to throw  •  P1: drag to dodge',
+            BALL_FLYING_2: 'P1: drag your players to dodge!' }[ph]
+        : { PLAYER_ATTACK: 'Pull back a player to aim & throw',
+            BALL_FLYING_P: '',
+            AI_WINDUP:     'Drag your players to dodge!',
+            BALL_FLYING_A: 'Drag to dodge!' }[ph];
+
+      if (hint) {
+        ctx.fillStyle    = 'rgba(255,255,255,0.65)';
+        ctx.font         = `${Math.max(11, Math.round(CH * 0.021))}px Arial`;
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(hint, CW / 2, barY + barH / 2);
+      }
+
+      if (game.mode === 'cpu' && ph === 'AI_WINDUP') {
+        const frac = game.windupTimer / C.WINDUP_MS;
+        const bw2  = Math.min(CW * 0.32, 170);
+        const bh2  = Math.min(barH * 0.32, 9);
+        const bx2  = CW / 2 - bw2 / 2;
+        const by2  = barY + barH / 2 + 14;
+        ctx.fillStyle = 'rgba(255,255,255,0.12)';
+        ctx.fillRect(bx2, by2, bw2, bh2);
+        ctx.fillStyle = '#ff4444';
+        ctx.fillRect(bx2, by2, bw2 * frac, bh2);
+      }
     }
   }
 }
@@ -903,13 +1058,56 @@ function drawResult() {
   ctx.restore();
 }
 
-// ── Overlays ──────────────────────────────────────────────────────────────────
+// ── Fullscreen button ──────────────────────────────────────────────────────────
+function drawFsBtn() {
+  const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  const b = fsBtn;
+
+  // Background pill
+  ctx.fillStyle = 'rgba(255,255,255,0.13)';
+  rr(b.x, b.y, b.w, b.h, 6);
+  ctx.fill();
+
+  // Corner-bracket icon (expand or compress)
+  const m  = Math.round(b.w * 0.20);   // outer margin
+  const ll = Math.round(b.w * 0.25);   // bracket arm length
+  const x0 = b.x + m,          y0 = b.y + m;
+  const x1 = b.x + b.w - m,    y1 = b.y + b.h - m;
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.78)';
+  ctx.lineWidth   = Math.max(1.5, b.w * 0.065);
+  ctx.lineCap     = 'square';
+  ctx.lineJoin    = 'miter';
+
+  if (!isFs) {
+    // Outward-pointing corners = expand
+    ctx.beginPath();
+    ctx.moveTo(x0 + ll, y0); ctx.lineTo(x0, y0); ctx.lineTo(x0, y0 + ll);
+    ctx.moveTo(x1 - ll, y0); ctx.lineTo(x1, y0); ctx.lineTo(x1, y0 + ll);
+    ctx.moveTo(x0, y1 - ll); ctx.lineTo(x0, y1); ctx.lineTo(x0 + ll, y1);
+    ctx.moveTo(x1, y1 - ll); ctx.lineTo(x1, y1); ctx.lineTo(x1 - ll, y1);
+    ctx.stroke();
+  } else {
+    // Inward-pointing corners = compress (centre offset)
+    const cx2 = b.x + b.w / 2, cy2 = b.y + b.h / 2;
+    const ix0 = cx2 - ll * 0.6, iy0 = cy2 - ll * 0.6;
+    const ix1 = cx2 + ll * 0.6, iy1 = cy2 + ll * 0.6;
+    ctx.beginPath();
+    ctx.moveTo(ix0 + ll, iy0); ctx.lineTo(ix0, iy0); ctx.lineTo(ix0, iy0 + ll);
+    ctx.moveTo(ix1 - ll, iy0); ctx.lineTo(ix1, iy0); ctx.lineTo(ix1, iy0 + ll);
+    ctx.moveTo(ix0, iy1 - ll); ctx.lineTo(ix0, iy1); ctx.lineTo(ix0 + ll, iy1);
+    ctx.moveTo(ix1, iy1 - ll); ctx.lineTo(ix1, iy1); ctx.lineTo(ix1 - ll, iy1);
+    ctx.stroke();
+  }
+}
+
+// ── Overlays ───────────────────────────────────────────────────────────────────
 function drawOverlay(title, titleColor, sub) {
   ctx.fillStyle = 'rgba(10,10,30,0.86)';
   ctx.fillRect(0, 0, CW, CH);
 
   const cx = CW / 2, cy = CH / 2;
-  const tsz = Math.max(32, Math.round(CH * 0.075));
+  const tsz = Math.max(30, Math.round(Math.min(CW, CH) * 0.088));
   ctx.fillStyle    = titleColor;
   ctx.font         = `bold ${tsz}px Arial`;
   ctx.textAlign    = 'center';
@@ -920,7 +1118,7 @@ function drawOverlay(title, titleColor, sub) {
   ctx.shadowBlur   = 0;
 
   ctx.fillStyle = 'rgba(255,255,255,0.72)';
-  ctx.font      = `${Math.max(13, Math.round(CH * 0.026))}px Arial`;
+  ctx.font      = `${Math.max(12, Math.round(CH * 0.026))}px Arial`;
   ctx.fillText(sub, cx, cy - CH * 0.08);
 }
 
@@ -929,12 +1127,12 @@ function drawMenuBtn(btn, color, label, sublabel) {
   rr(btn.x, btn.y, btn.w, btn.h, 10);
   ctx.fill();
   ctx.fillStyle    = '#ffffff';
-  ctx.font         = `bold ${Math.max(14, Math.round(CH * 0.030))}px Arial`;
+  ctx.font         = `bold ${Math.max(13, Math.round(Math.min(CW,CH) * 0.036))}px Arial`;
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(label, btn.x + btn.w / 2, btn.y + btn.h * 0.38);
   if (sublabel) {
-    ctx.font      = `${Math.max(11, Math.round(CH * 0.019))}px Arial`;
+    ctx.font      = `${Math.max(10, Math.round(Math.min(CW,CH) * 0.022))}px Arial`;
     ctx.fillStyle = 'rgba(255,255,255,0.72)';
     ctx.fillText(sublabel, btn.x + btn.w / 2, btn.y + btn.h * 0.72);
   }
@@ -944,34 +1142,42 @@ function drawMenu() {
   drawOverlay('DODGEBALL', '#ffffff', 'Pull back to throw  •  Drag to dodge');
 
   const cx = CW / 2, cy = CH / 2;
-  const bw = Math.min(200, CW * 0.40);
-  const bh = Math.max(52, CH * 0.08);
-  const gap = Math.min(18, CW * 0.04);
-  const totalW = bw * 2 + gap;
+  const bh = Math.max(48, Math.round(Math.min(CW, CH) * 0.095));
 
-  cpuBtn.w = bw; cpuBtn.h = bh;
-  pvpBtn.w = bw; pvpBtn.h = bh;
-  cpuBtn.x = cx - totalW / 2;
-  pvpBtn.x = cpuBtn.x + bw + gap;
-  cpuBtn.y = pvpBtn.y = cy - CH * 0.01;
+  if (isPortrait) {
+    // Stacked buttons for portrait (narrow screen)
+    const bw = Math.min(280, CW * 0.72);
+    cpuBtn.w = bw; cpuBtn.h = bh;
+    pvpBtn.w = bw; pvpBtn.h = bh;
+    cpuBtn.x = pvpBtn.x = cx - bw / 2;
+    cpuBtn.y = cy - CH * 0.025;
+    pvpBtn.y = cpuBtn.y + bh + Math.round(CH * 0.018);
+  } else {
+    // Side-by-side for landscape
+    const bw  = Math.min(200, CW * 0.38);
+    const gap = Math.min(18, CW * 0.04);
+    cpuBtn.w = bw; cpuBtn.h = bh;
+    pvpBtn.w = bw; pvpBtn.h = bh;
+    cpuBtn.x = cx - bw - gap / 2;
+    pvpBtn.x = cx + gap / 2;
+    cpuBtn.y = pvpBtn.y = cy - CH * 0.01;
+  }
 
   drawMenuBtn(cpuBtn, '#2255cc', 'VS COMPUTER', '1 player');
   drawMenuBtn(pvpBtn, '#bb2200', 'VS PLAYER',   '2 players · same device');
 
   ctx.fillStyle    = 'rgba(255,255,255,0.35)';
-  ctx.font         = `${Math.max(11, Math.round(CH * 0.019))}px Arial`;
+  ctx.font         = `${Math.max(10, Math.round(Math.min(CW,CH) * 0.022))}px Arial`;
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(
-    'Opponents move dynamically — aim carefully!',
-    cx, cpuBtn.y + bh + Math.max(20, CH * 0.042)
-  );
+  const noteY = (isPortrait ? pvpBtn : cpuBtn).y + bh + Math.max(18, CH * 0.038);
+  ctx.fillText('Opponents move dynamically — aim carefully!', cx, noteY);
 }
 
 function drawGameOver() {
-  const blueWon = game.winSide === 'blue';
-  const ab  = game.players.filter(p => p.alive).length;
-  const ar  = game.aiPlayers.filter(p => p.alive).length;
+  const blueWon  = game.winSide === 'blue';
+  const ab = game.players.filter(p => p.alive).length;
+  const ar = game.aiPlayers.filter(p => p.alive).length;
 
   let title, titleColor, sub;
   if (game.mode === 'human') {
@@ -987,7 +1193,7 @@ function drawGameOver() {
 
   const cx = CW / 2, cy = CH / 2;
   playBtn.w = Math.min(220, CW * 0.5);
-  playBtn.h = Math.max(46, CH * 0.07);
+  playBtn.h = Math.max(46, Math.round(Math.min(CW, CH) * 0.082));
   playBtn.x = cx - playBtn.w / 2;
   playBtn.y = cy + CH * 0.04;
 
@@ -995,13 +1201,13 @@ function drawGameOver() {
   rr(playBtn.x, playBtn.y, playBtn.w, playBtn.h, 10);
   ctx.fill();
   ctx.fillStyle    = '#ffffff';
-  ctx.font         = `bold ${Math.max(16, Math.round(CH * 0.032))}px Arial`;
+  ctx.font         = `bold ${Math.max(15, Math.round(CH * 0.032))}px Arial`;
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText('PLAY AGAIN', cx, playBtn.y + playBtn.h / 2);
 }
 
-// ── Game Loop ─────────────────────────────────────────────────────────────────
+// ── Game Loop ──────────────────────────────────────────────────────────────────
 function loop(ts) {
   const dt = Math.min(ts - lastTs, 50);
   lastTs = ts;

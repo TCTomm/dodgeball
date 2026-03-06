@@ -149,6 +149,7 @@ class Ball {
     this.r = r;
     this.trail = [];
     this.age = 0;
+    this.bounced = false;
   }
 }
 
@@ -407,11 +408,23 @@ function updateBall(dt) {
   b.x += b.vx * dt / 1000;
   b.y += b.vy * dt / 1000;
 
-  const mg = b.r + 8;
-  if (b.x < crtX - mg || b.x > crtX + crtW + mg ||
-      b.y < crtY - mg || b.y > crtY + crtH + mg) {
-    onMiss(); return;
+  // bounce once off each edge; second contact is a miss
+  let didBounce = false;
+  if (b.x - b.r < crtX) {
+    if (b.bounced) { onMiss(); return; }
+    b.x = crtX + b.r; b.vx = Math.abs(b.vx); didBounce = true;
+  } else if (b.x + b.r > crtX + crtW) {
+    if (b.bounced) { onMiss(); return; }
+    b.x = crtX + crtW - b.r; b.vx = -Math.abs(b.vx); didBounce = true;
   }
+  if (b.y - b.r < crtY) {
+    if (b.bounced) { onMiss(); return; }
+    b.y = crtY + b.r; b.vy = Math.abs(b.vy); didBounce = true;
+  } else if (b.y + b.r > crtY + crtH) {
+    if (b.bounced) { onMiss(); return; }
+    b.y = crtY + crtH - b.r; b.vy = -Math.abs(b.vy); didBounce = true;
+  }
+  if (didBounce) b.bounced = true;
 
   const targets = b.from === 'blue' ? game.aiPlayers : game.players;
   for (const p of targets) {
